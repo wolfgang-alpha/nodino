@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>nodino</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="layout">
+        <div id="agent-bubbles" class="bubble-column"></div>
+        <div id="card-container"></div>
+        <div id="user-bubbles" class="bubble-column"></div>
+    </div>
+    <button id="kanban-toggle">kanban</button>
+    <div id="kanban-board">
+        <div class="kanban-column" data-status="backlog">
+            <div class="kanban-column-header"><span class="status-dot backlog"></span>Backlog <span class="kanban-column-count">0</span></div>
+            <div class="kanban-cards"></div>
+        </div>
+        <div class="kanban-column" data-status="todo">
+            <div class="kanban-column-header"><span class="status-dot todo"></span>To Do <span class="kanban-column-count">0</span></div>
+            <div class="kanban-cards"></div>
+        </div>
+        <div class="kanban-column" data-status="in_progress">
+            <div class="kanban-column-header"><span class="status-dot in_progress"></span>In Progress <span class="kanban-column-count">0</span></div>
+            <div class="kanban-cards"></div>
+        </div>
+        <div class="kanban-column" data-status="done">
+            <div class="kanban-column-header"><span class="status-dot done"></span>Done <span class="kanban-column-count">0</span></div>
+            <div class="kanban-cards"></div>
+        </div>
+    </div>
+    <div id="status"></div>
+    <div id="input-bubble"></div>
+    <div id="input-area">
+        <input type="text" id="text-input" placeholder="type something..." autocomplete="off" />
+    </div>
+    <audio id="tts-player"></audio>
+
+<script>
+const agentBubbles = document.getElementById('agent-bubbles');
+const userBubbles = document.getElementById('user-bubbles');
+const cardContainer = document.getElementById('card-container');
+const statusEl = document.getElementById('status');
+const inputBubble = document.getElementById('input-bubble');
+const textInput = document.getElementById('text-input');
+const ttsPlayer = document.getElementById('tts-player');
+
+let conversationId = null;
+let processing = false;
+
+// Fade timing
+const FADE_INTERVAL = 6000;
+const FADE_STAGES = ['fade-1', 'fade-2', 'fade-3', 'fade-out'];
+
+// --- Initialization ---
+
+async function init() {
+    try {
+        const res = await fetch('/api/conversation/start', { method: 'POST' });
+        const data = await res.json();
+        conversationId = data.conversation_id;
+    } catch (e) {
+        setStatus('connection error');
+    }
+    setInterval(ageElements, FADE_INTERVAL);
+}
+
+function setStatus(text) {
+    statusEl.textContent = text;
+    statusEl.style.opacity = text ? '1' : '0';
+}
+
+// --- Input bubble indicator ---
+
+textInput.addEventListener('input', () => {
+    if (textInput.value.length > 0) {
+        inputBubble.classList.add('visible');
+        if (textInput.value.length > 20) {
+            inputBubble.classList.add('growing');
+        } else {
+            inputBubble.classList.remove('growing');
+        }
+    } else {
+        inputBubble.classList.remove('visible', 'growing');
+    }
+});
+
+// --- Submit on Enter ---
+
+textInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !processing) {
+        e.preventDefault();
+        const text = textInput.value.trim();
+        if (!text) return;
+        textInput.value = '';
+        inputBubble.classList.remove('visible', 'growing');
+        sendMessage(text);
+    }
+});
+
+// --- Send message flow ---
+
+async function sendMessage(text) {
+    processing = true;
+    setStatus('thinking...');
+
+    // Add user bubble (right side)
+    addBubble(userBubbles, text, 'bubble-user');
+
+    try {
+        // Chat with agent
+        const chatRes = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                conversation_id: conversationId,
+                message: text
+            })
+        });
+
+        if (!chatRes.ok) throw new Error('chat failed');
+        const chatData = await chatRes.json();
+
+        // Display data cards in center
+        if (chatData.knots) {
+            chatData.knots.forEach(k => addKnotCard(k));
+        }
+        if (chatData.entities) {
+            chatData.entities.forEach(e => addEntityCard(e));
+        }
+
+        // Add agent bubble (left side)
+        if (chatData.reply) {
+            addBubble(agentBubbles, chatData.reply, 'bubble-agent');
+            // Speak the reply
+            speakReply(chatData.reply);
+        }
+
+        setStatus('');
+    } catch (e) {
+        console.error('error:', e);
+        setStatus('error');
+        setTimeout(() => setStatus(''), 2000);
+    } finally {
+        processing = false;
+        textInput.focus();
+    }
+}
+
+// --- TTS ---
+
+async function speakReply(text) {
+    try {
+        const res = await fetch('/api/speak', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text })
+        });
+        if (!res.ok) return;
+
+        const audioBlob = await res.blob();
+        const audioUrl = URL.createObjectURL(audioBlob);
+        ttsPlayer.src = audioUrl;
+        ttsPlayer.onended = () => URL.revokeObjectURL(audioUrl);
+        ttsPlayer.play();
+    } catch (e) {
+        console.error('TTS error:', e);
+    }
+}
+
+// --- Bubbles ---
+
+function addBubble(container, text, className) {
+    const bubble = document.createElement('div');
+    bubble.className = `bubble ${className} entering`;
+    bubble.textContent = text;
+    bubble.dataset.fadeStage = '-1';
+    bubble.dataset.created = Date.now();
+
+    container.appendChild(bubble);
+
+    // Scroll container to show newest
+    container.scrollTop = container.scrollHeight;
+
+    // Remove entering class after animation
+    setTimeout(() => bubble.classList.remove('entering'), 600);
+
+    // Remove old bubbles if too many
+    const bubbles = container.querySelectorAll('.bubble');
+    if (bubbles.length > 20) {
+        bubbles[0].remove();
+    }
+}
+
+// --- Data cards ---
+
+function addKnotCard(knot) {
+    const card = document.createElement('div');
+    card.className = 'card entering';
+    card.dataset.id = knot.id;
+    card.dataset.created = Date.now();
+    card.dataset.fadeStage = '-1';
+
+    let timeHTML = '';
+    if (knot.occurs_at) {
+        timeHTML = `<span class="card-time">${formatTime(knot.occurs_at)}</span>`;
+    }
+
+    const dots = '\u25CF'.repeat(knot.importance) + '\u25CB'.repeat(5 - knot.importance);
+
+    card.innerHTML = `
+        <div class="card-header">
+            <span class="card-type type-${knot.type}">${knot.type}</span>
+            <span class="card-importance">${dots}</span>
+            ${timeHTML}
+        </div>
+        <div class="card-content" contenteditable="false">${escapeHtml(knot.content)}</div>
+    `;
+
+    // Double-click to edit
+    const contentEl = card.querySelector('.card-content');
+    contentEl.addEventListener('dblclick', () => {
+        contentEl.contentEditable = 'true';
+        contentEl.focus();
+    });
+    contentEl.addEventListener('blur', () => {
+        contentEl.contentEditable = 'false';
+        const newContent = contentEl.textContent.trim();
+        if (newContent && newContent !== knot.content) {
+            updateKnot(knot.id, newContent);
+            knot.content = newContent;
+        }
+    });
+    contentEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            contentEl.blur();
+        }
+        if (e.key === 'Escape') {
+            contentEl.textContent = knot.content;
+            contentEl.blur();
+        }
+    });
+
+    // Drag to pin
+    setupDragToPin(card);
+
+    cardContainer.appendChild(card);
+    cardContainer.scrollTop = cardContainer.scrollHeight;
+    setTimeout(() => card.classList.remove('entering'), 500);
+}
+
+function addEntityCard(entity) {
+    const card = document.createElement('div');
+    card.className = 'card entering';
+    card.dataset.created = Date.now();
+    card.dataset.fadeStage = '-1';
+
+    card.innerHTML = `
+        <div class="card-header">
+            <span class="card-type type-contact">${entity.kind}</span>
+        </div>
+        <div class="card-content" contenteditable="false">
+            <strong>${escapeHtml(entity.name)}</strong>${entity.description ? ' \u2014 ' + escapeHtml(entity.description) : ''}
+        </div>
+    `;
+
+    setupDragToPin(card);
+    cardContainer.appendChild(card);
+    cardContainer.scrollTop = cardContainer.scrollHeight;
+    setTimeout(() => card.classList.remove('entering'), 500);
+}
+
+// --- Aging / fading for both bubbles and cards ---
+
+function ageElements() {
+    const selectors = [
+        '#card-container .card:not(.pinned):not(.entering)',
+        '.bubble-column .bubble:not(.entering)'
+    ];
+
+    selectors.forEach(sel => {
+        document.querySelectorAll(sel).forEach(el => {
+            let stage = parseInt(el.dataset.fadeStage || '-1');
+            stage++;
+            el.dataset.fadeStage = stage;
+
+            FADE_STAGES.forEach(cls => el.classList.remove(cls));
+
+            if (stage >= 0 && stage < FADE_STAGES.length) {
+                el.classList.add(FADE_STAGES[stage]);
+            }
+
+            if (stage >= FADE_STAGES.length) {
+                el.addEventListener('transitionend', () => el.remove(), { once: true });
+                el.classList.add('fade-out');
+                setTimeout(() => { if (el.parentNode) el.remove(); }, 3000);
+            }
+        });
+    });
+}
+
+// --- Drag to pin ---
+
+function setupDragToPin(card) {
+    let startX, startY, dragging = false;
+
+    card.addEventListener('mousedown', (e) => {
+        if (e.target.contentEditable === 'true') return;
+        startX = e.clientX;
+        startY = e.clientY;
+        dragging = false;
+
+        const onMove = (e) => {
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+                dragging = true;
+                card.classList.add('dragging');
+            }
+        };
+
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            card.classList.remove('dragging');
+            if (dragging) {
+                card.classList.toggle('pinned');
+                card.dataset.fadeStage = '-1';
+                FADE_STAGES.forEach(cls => card.classList.remove(cls));
+            }
+        };
+
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    });
+}
+
+// --- API helpers ---
+
+async function updateKnot(id, content) {
+    try {
+        await fetch('/api/knots', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, content })
+        });
+    } catch (e) {
+        console.error('update error:', e);
+    }
+}
+
+// --- Utilities ---
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+function formatTime(dateStr) {
+    try {
+        const d = new Date(dateStr);
+        const now = new Date();
+        const diff = d - now;
+        const days = Math.floor(diff / 86400000);
+
+        if (days === 0) return 'today ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (days === 1) return 'tomorrow ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (days === -1) return 'yesterday';
+        if (days > 1 && days < 7) return d.toLocaleDateString([], { weekday: 'long' });
+        return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    } catch {
+        return dateStr;
+    }
+}
+
+// --- Kanban board ---
+
+const kanbanToggle = document.getElementById('kanban-toggle');
+const kanbanBoard = document.getElementById('kanban-board');
+let kanbanVisible = false;
+
+kanbanToggle.addEventListener('click', () => {
+    kanbanVisible = !kanbanVisible;
+    kanbanBoard.classList.toggle('visible', kanbanVisible);
+    kanbanToggle.classList.toggle('active', kanbanVisible);
+    if (kanbanVisible) loadKanban();
+});
+
+async function loadKanban() {
+    try {
+        const res = await fetch('/api/knots?type=task&limit=100');
+        const tasks = await res.json();
+        if (!tasks) return;
+
+        // Clear all columns
+        kanbanBoard.querySelectorAll('.kanban-cards').forEach(col => col.innerHTML = '');
+
+        // Sort tasks into columns
+        tasks.forEach(task => {
+            const status = task.status || 'backlog';
+            const column = kanbanBoard.querySelector(`.kanban-column[data-status="${status}"] .kanban-cards`);
+            if (column) {
+                column.appendChild(createKanbanCard(task));
+            }
+        });
+
+        // Update counts
+        kanbanBoard.querySelectorAll('.kanban-column').forEach(col => {
+            const count = col.querySelector('.kanban-cards').children.length;
+            col.querySelector('.kanban-column-count').textContent = count;
+        });
+    } catch (e) {
+        console.error('kanban load error:', e);
+    }
+}
+
+function createKanbanCard(task) {
+    const card = document.createElement('div');
+    card.className = 'kanban-card';
+    card.draggable = true;
+    card.dataset.id = task.id;
+
+    const dots = '\u25CF'.repeat(task.importance) + '\u25CB'.repeat(5 - task.importance);
+
+    card.innerHTML = `
+        <div class="card-header">
+            <span class="card-type type-task">task</span>
+            <span class="card-importance">${dots}</span>
+        </div>
+        <div>${escapeHtml(task.content)}</div>
+    `;
+
+    // Drag events
+    card.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('text/plain', task.id);
+        card.classList.add('dragging');
+    });
+    card.addEventListener('dragend', () => {
+        card.classList.remove('dragging');
+    });
+
+    return card;
+}
+
+// Drop zones on kanban columns
+kanbanBoard.querySelectorAll('.kanban-cards').forEach(dropZone => {
+    dropZone.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        dropZone.classList.add('drag-over');
+    });
+    dropZone.addEventListener('dragleave', () => {
+        dropZone.classList.remove('drag-over');
+    });
+    dropZone.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('drag-over');
+        const taskId = parseInt(e.dataTransfer.getData('text/plain'));
+        const newStatus = dropZone.closest('.kanban-column').dataset.status;
+
+        // Update backend
+        try {
+            await fetch('/api/knots', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: taskId, status: newStatus })
+            });
+            // Reload kanban
+            loadKanban();
+        } catch (err) {
+            console.error('status update error:', err);
+        }
+    });
+});
+
+// --- Start ---
+
+init();
+textInput.focus();
+</script>
+</body>
+</html>

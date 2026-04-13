@@ -1,0 +1,507 @@
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+/* --- Dark mode (default) --- */
+:root {
+    --bg: #0a0a0f;
+    --card-bg: rgba(255, 255, 255, 0.05);
+    --card-border: rgba(255, 255, 255, 0.08);
+    --card-hover-border: rgba(255, 255, 255, 0.15);
+    --text: #c8c8d0;
+    --text-dim: #6a6a7a;
+    --accent: #4a6fa5;
+    --input-bg: rgba(255, 255, 255, 0.04);
+    --input-border: rgba(255, 255, 255, 0.1);
+    --input-focus-border: rgba(74, 111, 165, 0.5);
+    --user-bubble: rgba(100, 180, 100, 0.15);
+    --user-bubble-border: rgba(100, 180, 100, 0.25);
+    --user-bubble-text: #a0d4a0;
+    --agent-bubble: rgba(100, 140, 200, 0.15);
+    --agent-bubble-border: rgba(100, 140, 200, 0.25);
+    --agent-bubble-text: #a0c0e0;
+    --pin-shadow: rgba(74, 111, 165, 0.15);
+    --drag-shadow: rgba(0, 0, 0, 0.4);
+    --card-edit-bg: rgba(255, 255, 255, 0.03);
+}
+
+/* --- Light mode --- */
+@media (prefers-color-scheme: light) {
+    :root {
+        --bg: #f5f5f8;
+        --card-bg: rgba(0, 0, 0, 0.03);
+        --card-border: rgba(0, 0, 0, 0.08);
+        --card-hover-border: rgba(0, 0, 0, 0.18);
+        --text: #2a2a30;
+        --text-dim: #8a8a95;
+        --accent: #3a5a8a;
+        --input-bg: rgba(0, 0, 0, 0.03);
+        --input-border: rgba(0, 0, 0, 0.12);
+        --input-focus-border: rgba(58, 90, 138, 0.5);
+        --user-bubble: rgba(60, 150, 60, 0.1);
+        --user-bubble-border: rgba(60, 150, 60, 0.25);
+        --user-bubble-text: #3a7a3a;
+        --agent-bubble: rgba(60, 100, 180, 0.1);
+        --agent-bubble-border: rgba(60, 100, 180, 0.25);
+        --agent-bubble-text: #3a5a9a;
+        --pin-shadow: rgba(58, 90, 138, 0.2);
+        --drag-shadow: rgba(0, 0, 0, 0.15);
+        --card-edit-bg: rgba(0, 0, 0, 0.02);
+    }
+}
+
+html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    overflow: hidden;
+}
+
+/* --- Layout: three columns --- */
+/* Left: agent bubbles | Center: data cards | Right: user bubbles */
+#layout {
+    display: flex;
+    height: 100%;
+    width: 100%;
+}
+
+/* Bubble columns (left + right) */
+.bubble-column {
+    width: 20%;
+    min-width: 160px;
+    max-width: 280px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 16px 12px 80px 12px;
+    gap: 8px;
+    overflow: hidden;
+}
+
+/* Center column for data cards */
+#card-container {
+    flex: 1;
+    height: 100%;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 20px 30px 80px 30px;
+    gap: 12px;
+    scrollbar-width: none;
+}
+
+#card-container::-webkit-scrollbar {
+    display: none;
+}
+
+/* --- Conversation bubbles --- */
+.bubble {
+    padding: 10px 14px;
+    border-radius: 16px;
+    font-size: 13px;
+    line-height: 1.4;
+    max-width: 100%;
+    word-wrap: break-word;
+    flex-shrink: 0;
+    transition: opacity 2s ease, transform 0.6s ease;
+    opacity: 1;
+}
+
+.bubble.entering {
+    animation: bubbleIn 0.6s ease forwards;
+}
+
+/* User bubbles — green, right side */
+.bubble-user {
+    background: var(--user-bubble);
+    border: 1px solid var(--user-bubble-border);
+    color: var(--user-bubble-text);
+    align-self: flex-end;
+    border-bottom-right-radius: 4px;
+}
+
+/* Agent bubbles — blue, left side */
+.bubble-agent {
+    background: var(--agent-bubble);
+    border: 1px solid var(--agent-bubble-border);
+    color: var(--agent-bubble-text);
+    align-self: flex-start;
+    border-bottom-left-radius: 4px;
+}
+
+/* Bubble floating animation — starts at bottom center, floats to its column */
+@keyframes bubbleIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Bubble fading */
+.bubble.fade-1 { opacity: 0.6; }
+.bubble.fade-2 { opacity: 0.3; }
+.bubble.fade-3 { opacity: 0.1; }
+.bubble.fade-out {
+    opacity: 0;
+    pointer-events: none;
+}
+
+/* --- Data cards (center) --- */
+.card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    transition: opacity 2s ease, transform 0.4s ease;
+    opacity: 1;
+    flex-shrink: 0;
+    position: relative;
+    cursor: default;
+}
+
+.card:hover {
+    border-color: var(--card-hover-border);
+}
+
+.card.entering {
+    animation: cardSlideIn 0.5s ease forwards;
+}
+
+@keyframes cardSlideIn {
+    from {
+        opacity: 0;
+        transform: translateY(30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.card.fade-1 { opacity: 0.7; }
+.card.fade-2 { opacity: 0.45; }
+.card.fade-3 { opacity: 0.2; }
+.card.fade-out {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.card.pinned {
+    opacity: 1 !important;
+    border-color: var(--accent);
+    box-shadow: 0 0 10px var(--pin-shadow);
+}
+
+.card.pinned::after {
+    content: "\u{1F4CC}";
+    position: absolute;
+    top: 6px;
+    right: 10px;
+    font-size: 12px;
+    opacity: 0.6;
+}
+
+.card.dragging {
+    opacity: 0.8;
+    transform: scale(1.02);
+    z-index: 50;
+    box-shadow: 0 4px 20px var(--drag-shadow);
+}
+
+/* Card content */
+.card-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.card-type {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-weight: bold;
+}
+
+.type-event        { background: rgba(74, 111, 165, 0.3); color: #7aa3d4; }
+.type-appointment  { background: rgba(200, 120, 50, 0.3); color: #d4a060; }
+.type-reminder     { background: rgba(180, 80, 80, 0.3);  color: #d48080; }
+.type-observation  { background: rgba(100, 140, 100, 0.3); color: #90b490; }
+.type-mood         { background: rgba(140, 80, 160, 0.3); color: #b490c8; }
+.type-log          { background: rgba(100, 100, 100, 0.3); color: #a0a0a0; }
+.type-anecdote     { background: rgba(160, 140, 60, 0.3); color: #c8b860; }
+.type-idea         { background: rgba(60, 160, 160, 0.3); color: #60c8c8; }
+.type-project      { background: rgba(80, 80, 180, 0.3);  color: #8080d4; }
+.type-decision     { background: rgba(160, 100, 60, 0.3); color: #c88040; }
+.type-contact      { background: rgba(60, 140, 120, 0.3); color: #60b4a0; }
+.type-task         { background: rgba(180, 140, 200, 0.3); color: #c0a0d8; }
+
+@media (prefers-color-scheme: light) {
+    .type-event        { background: rgba(74, 111, 165, 0.15); color: #3a6a9a; }
+    .type-appointment  { background: rgba(200, 120, 50, 0.15); color: #9a6020; }
+    .type-reminder     { background: rgba(180, 80, 80, 0.15);  color: #9a4040; }
+    .type-observation  { background: rgba(100, 140, 100, 0.15); color: #4a7a4a; }
+    .type-mood         { background: rgba(140, 80, 160, 0.15); color: #7a4090; }
+    .type-log          { background: rgba(100, 100, 100, 0.15); color: #606060; }
+    .type-anecdote     { background: rgba(160, 140, 60, 0.15); color: #8a7a20; }
+    .type-idea         { background: rgba(60, 160, 160, 0.15); color: #2a8a8a; }
+    .type-project      { background: rgba(80, 80, 180, 0.15);  color: #4040a0; }
+    .type-decision     { background: rgba(160, 100, 60, 0.15); color: #8a5020; }
+    .type-contact      { background: rgba(60, 140, 120, 0.15); color: #2a7a60; }
+    .type-task         { background: rgba(180, 140, 200, 0.15); color: #6a4080; }
+}
+
+.card-importance {
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-left: auto;
+}
+
+.card-time {
+    font-size: 11px;
+    color: var(--text-dim);
+}
+
+.card-content {
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 1em;
+    outline: none;
+}
+
+.card-content:focus {
+    background: var(--card-edit-bg);
+    border-radius: 3px;
+    padding: 2px 4px;
+    margin: -2px -4px;
+}
+
+/* --- Text input --- */
+#input-area {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: center;
+    padding: 16px 30px;
+    z-index: 100;
+}
+
+#text-input {
+    width: 100%;
+    max-width: 600px;
+    padding: 12px 18px;
+    background: var(--input-bg);
+    border: 1px solid var(--input-border);
+    border-radius: 24px;
+    color: var(--text);
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.3s, box-shadow 0.3s;
+}
+
+#text-input:focus {
+    border-color: var(--input-focus-border);
+    box-shadow: 0 0 15px rgba(74, 111, 165, 0.15);
+}
+
+#text-input::placeholder {
+    color: var(--text-dim);
+}
+
+/* --- Emerging bubble indicator --- */
+#input-bubble {
+    position: fixed;
+    bottom: 70px;
+    left: 50%;
+    transform: translateX(-50%) scale(0);
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--user-bubble-border);
+    opacity: 0;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+    pointer-events: none;
+    z-index: 99;
+}
+
+#input-bubble.visible {
+    transform: translateX(-50%) scale(1);
+    opacity: 0.7;
+}
+
+#input-bubble.growing {
+    transform: translateX(-50%) scale(1.5);
+    opacity: 0.9;
+}
+
+/* --- Status text --- */
+#status {
+    position: fixed;
+    bottom: 56px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    transition: opacity 0.3s;
+    pointer-events: none;
+    z-index: 101;
+}
+
+/* Audio player hidden */
+#tts-player {
+    display: none;
+}
+
+/* --- Kanban toggle button --- */
+#kanban-toggle {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    padding: 6px 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    color: var(--text-dim);
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    cursor: pointer;
+    z-index: 200;
+    transition: border-color 0.2s, color 0.2s;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+#kanban-toggle:hover {
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+#kanban-toggle.active {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+
+/* --- Kanban board overlay --- */
+#kanban-board {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 70px;
+    z-index: 150;
+    background: var(--bg);
+    padding: 50px 20px 20px 20px;
+}
+
+#kanban-board.visible {
+    display: flex;
+    gap: 16px;
+}
+
+.kanban-column {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.kanban-column-header {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    color: var(--text-dim);
+    padding: 8px 12px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--card-border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.kanban-column-count {
+    background: var(--card-bg);
+    border-radius: 10px;
+    padding: 1px 7px;
+    font-size: 10px;
+}
+
+.kanban-cards {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 4px;
+    scrollbar-width: none;
+}
+
+.kanban-cards::-webkit-scrollbar {
+    display: none;
+}
+
+/* Kanban card (reuses .card styles) */
+.kanban-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 13px;
+    line-height: 1.4;
+    cursor: grab;
+    transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s;
+}
+
+.kanban-card:hover {
+    border-color: var(--card-hover-border);
+}
+
+.kanban-card.dragging {
+    opacity: 0.6;
+    transform: scale(0.97);
+}
+
+.kanban-card .card-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.kanban-card .card-importance {
+    font-size: 9px;
+}
+
+.kanban-cards.drag-over {
+    background: rgba(74, 111, 165, 0.05);
+    border-radius: 6px;
+}
+
+/* Kanban status dot indicators */
+.status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-dot.backlog    { background: #6a6a7a; }
+.status-dot.todo       { background: #7aa3d4; }
+.status-dot.in_progress { background: #d4a060; }
+.status-dot.done       { background: #90b490; }

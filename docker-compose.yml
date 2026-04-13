@@ -1,0 +1,45 @@
+services:
+  mariadb:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: nodino
+      MARIADB_DATABASE: nodino
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  piper:
+    build: ./piper
+    restart: unless-stopped
+    environment:
+      PIPER_VOICE: en_US-lessac-medium
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      DB_DSN: "root:nodino@tcp(mariadb:3306)/nodino"
+      OLLAMA_URL: "http://192.168.0.132:11434"
+      OLLAMA_MODEL: "devstral-2:123b-cloud"
+      PIPER_URL: "http://piper:5000"
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8889:80"
+      - "8890:443"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
