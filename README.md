@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.png" alt="nodino" width="200">
+  <img src="logo.png" alt="nodino" width="500">
 </p>
 
 ---
