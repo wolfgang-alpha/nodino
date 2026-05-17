@@ -1,12 +1,14 @@
 # TODO
 
-## Speech-to-Text
+## Done
 
-Add speech-to-text input via a microphone button alongside the text input. The Piper service (`./piper`) currently handles text-to-speech only.
+- Speech-to-text via faster-whisper (medium.en model, int8 quantization)
+- Mempalace integration (semantic search + knowledge graph)
+- Anthropic API with Claude Sonnet tool-use
 
-Options to evaluate:
-- **Whisper** (OpenAI) — tested with `whisper-base`, but accuracy was too low for practical use. Revisit with `whisper-small` or `whisper-medium` models.
-- **whisper.cpp** — lighter alternative, could run as a sidecar container.
-- **Browser Web Speech API** — zero-infrastructure option, but browser support varies.
+## Future
 
-The original UI concept had a sphere button for push-to-talk with a voice-stop keyword ("over"). This could be revisited once a reliable STT backend is in place.
+- Multi-language STT support (currently English only)
+- Conversation mining — ingest past conversations into mempalace
+- Project file mining — import documents/notes into the memory palace
+- Mobile-optimized UI (responsive layout for small screens)

@@ -2,157 +2,111 @@ package main
 
 import (
 	"bytes"
-	"database/sql"
+	"crypto/tls"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	_ "github.com/go-sql-driver/mysql"
 )
 
-var db *sql.DB
-var ollamaURL, ollamaModel, piperURL string
+var mempalaceURL, anthropicKey, anthropicModel, piperURL, whisperURL string
+var calDavURL, nextcloudUser, nextcloudPass string
 
-// conversation history for context window
 var (
-	convHistory   = make(map[int][]message)
+	convHistory   = make(map[string][]anthropicMsg)
 	convHistoryMu sync.RWMutex
+	convCounter   int
+	convCounterMu sync.Mutex
 )
 
-type message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+type anthropicMsg struct {
+	Role    string        `json:"role"`
+	Content []contentPart `json:"content"`
 }
 
-const systemPromptTemplate = `You are nodino, a second-brain assistant. You listen to the user and extract structured knowledge from their speech. You store important information as "knots" in a database.
+type contentPart struct {
+	Type      string          `json:"type"`
+	Text      string          `json:"text,omitempty"`
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   string          `json:"content,omitempty"`
+}
+
+const systemPrompt = `You are nodino, a second-brain assistant. You listen to the user and extract structured knowledge from natural conversation. You store information as "knots" in a memory palace using the tools provided.
 
 YOUR BEHAVIOR:
 - Extract meaningful pieces of information from what the user says
 - Categorize each piece with the correct type and importance
 - Recognize people, animals, places, organizations, and things as entities
-- Link related knots together via "nodinos" (relationship links)
+- Link related knots together via relationships
 - When you cannot determine a field (especially time, type, or entity identity), ASK the user
-- Keep your spoken replies concise and natural — you are a conversation partner, not a robot
-- Never mention SQL, databases, or technical internals unless the user asks
-- IMPORTANT: Whenever you reference, mention, or discuss existing stored information, you MUST include a "retrieve" action so the data is actually shown to the user on screen. The user can ONLY see data that you retrieve — just talking about it is not enough. Always retrieve relevant knots when they are related to the conversation.
+- Keep your spoken replies concise and natural
+- Never mention databases, APIs, or technical internals unless asked
+- IMPORTANT: Whenever you reference or discuss stored information, you MUST use the search_knowledge tool so the data is actually shown to the user on screen. The user can ONLY see data that you retrieve — just talking about it is not enough.
 
-KNOT TYPES (pick the best fit):
-- event: something that happened
-- appointment: future scheduled thing with a time
-- reminder: something to not forget, no fixed time
-- observation: thoughts, concerns, opinions, realizations
-- mood: emotional state
-- log: routine tracking (meals, sleep, exercise, etc.)
-- anecdote: stories, memorable moments
-- idea: creative sparks, inspiration
-- project: ongoing initiative or body of work
-- decision: a choice that was made
-- contact: first encounter or key update about a person
-- task: an actionable to-do item (always include a "status" field: backlog, todo, in_progress, or done)
+KNOT TYPES (use as the "room" when storing):
+event, appointment, reminder, observation, mood, log, anecdote, idea, project, decision, contact, task
 
 IMPORTANCE SCALE (1-5):
 1 = trivial/routine, 2 = minor, 3 = normal, 4 = important, 5 = urgent/critical
 
+For tasks, ALWAYS set a status: backlog, todo, in_progress, or done.
+
 ENTITY KINDS: person, animal, place, organization, thing
 
-RELATIONSHIP TYPES: same_thread, follow_up, caused_by, related
-
-You MUST respond with valid JSON in this exact format:
-{
-  "reply": "your natural language response to speak aloud",
-  "actions": [
-    {
-      "action": "create_knot",
-      "content": "the information",
-      "type": "event",
-      "importance": 3,
-      "occurs_at": "2026-03-20 14:00:00 or null",
-      "status": "todo (only for tasks, omit for other types)"
-    },
-    {
-      "action": "create_entity",
-      "name": "Person Name",
-      "kind": "person",
-      "description": "brief description"
-    },
-    {
-      "action": "link_entity",
-      "knot_index": 0,
-      "entity_name": "Person Name",
-      "role": "attendee"
-    },
-    {
-      "action": "create_nodino",
-      "knot_a_index": 0,
-      "knot_b_id": 42,
-      "relationship": "follow_up"
-    },
-    {
-      "action": "retrieve",
-      "type": "appointment",
-      "limit": 5
-    }
-  ]
-}
-
-RULES FOR ACTIONS:
-- knot_index refers to the 0-based index of a knot created in the same actions array
-- knot_b_id refers to an existing knot ID from the database
-- entity_name in link_entity should match the name of an entity being created OR an existing entity
-- retrieve returns existing knots matching the filter — use this to show relevant data to the user ON SCREEN
-- You MUST use retrieve whenever you talk about existing data — without it the user sees nothing
-- retrieve with no type filter returns all recent knots; with a type filter returns only that type
-- You can have zero actions if the user is just chatting and there is nothing to store or show
-- If you are unsure about a field, set "reply" to ask a clarifying question and skip that action
-
-EXISTING ENTITIES:
-%s
-
-RECENT KNOTS:
-%s
-
-DATABASE SCHEMA:
-%s`
+RELATIONSHIP TYPES: same_thread, follow_up, caused_by, related`
 
 func main() {
-	dsn := envOr("DB_DSN", "root:nodino@tcp(mariadb:3306)/nodino")
-	ollamaURL = envOr("OLLAMA_URL", "http://192.168.0.132:11434")
-	ollamaModel = envOr("OLLAMA_MODEL", "devstral-2:123b-cloud")
+	mempalaceURL = envOr("MEMPALACE_URL", "http://mempalace-api:8000")
+	anthropicKey = envOr("ANTHROPIC_API_KEY", "")
+	anthropicModel = envOr("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 	piperURL = envOr("PIPER_URL", "http://piper:5000")
+	whisperURL = envOr("WHISPER_URL", "http://whisper:5001")
+	calDavURL = envOr("CAL_DAV", "")
+	nextcloudUser = envOr("NEXTCLOUD_USER", "")
+	nextcloudPass = envOr("NEXTCLOUD_PASSWORD", "")
 
-	var err error
-	for i := 0; i < 30; i++ {
-		db, err = sql.Open("mysql", dsn+"?parseTime=true&multiStatements=false")
-		if err == nil {
-			err = db.Ping()
-		}
-		if err == nil {
-			break
-		}
-		log.Printf("waiting for database... (%v)", err)
-		time.Sleep(2 * time.Second)
+	if anthropicKey == "" {
+		log.Fatal("ANTHROPIC_API_KEY is required")
 	}
-	if err != nil {
-		log.Fatalf("could not connect to database: %v", err)
-	}
-	log.Println("connected to database")
+
+	waitForMempalace()
 
 	http.HandleFunc("/api/conversation/start", handleConversationStart)
 	http.HandleFunc("/api/conversation/end", handleConversationEnd)
 	http.HandleFunc("/api/chat", handleChat)
 	http.HandleFunc("/api/speak", handleSpeak)
+	http.HandleFunc("/api/transcribe", handleTranscribe)
 	http.HandleFunc("/api/knots", handleKnots)
 
 	log.Println("backend listening on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func waitForMempalace() {
+	client := &http.Client{Timeout: 2 * time.Second}
+	for i := 0; i < 30; i++ {
+		resp, err := client.Get(mempalaceURL + "/health")
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == 200 {
+				log.Println("mempalace is ready")
+				return
+			}
+		}
+		log.Printf("waiting for mempalace... (%v)", err)
+		time.Sleep(2 * time.Second)
+	}
+	log.Fatal("mempalace did not become ready")
 }
 
 // --- Conversation management ---
@@ -162,16 +116,16 @@ func handleConversationStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	result, err := db.Exec("INSERT INTO conversations () VALUES ()")
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
-		return
-	}
-	id, _ := result.LastInsertId()
+	convCounterMu.Lock()
+	convCounter++
+	id := fmt.Sprintf("conv_%d_%d", time.Now().Unix(), convCounter)
+	convCounterMu.Unlock()
+
 	convHistoryMu.Lock()
-	convHistory[int(id)] = []message{}
+	convHistory[id] = []anthropicMsg{}
 	convHistoryMu.Unlock()
-	writeJSON(w, 200, map[string]int64{"conversation_id": id})
+
+	writeJSON(w, 200, map[string]string{"conversation_id": id})
 }
 
 func handleConversationEnd(w http.ResponseWriter, r *http.Request) {
@@ -180,44 +134,18 @@ func handleConversationEnd(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ConversationID int `json:"conversation_id"`
+		ConversationID string `json:"conversation_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
 	}
 
-	// Generate summary from conversation knots
-	summary := generateSummary(req.ConversationID)
-	db.Exec("UPDATE conversations SET ended_at = NOW(), summary = ? WHERE id = ?", summary, req.ConversationID)
-
 	convHistoryMu.Lock()
 	delete(convHistory, req.ConversationID)
 	convHistoryMu.Unlock()
 
-	writeJSON(w, 200, map[string]string{"status": "ended", "summary": summary})
-}
-
-func generateSummary(convID int) string {
-	rows, err := db.Query("SELECT content, type FROM knots WHERE conversation_id = ? ORDER BY created_at", convID)
-	if err != nil {
-		return ""
-	}
-	defer rows.Close()
-
-	var parts []string
-	for rows.Next() {
-		var content, ktype string
-		rows.Scan(&content, &ktype)
-		parts = append(parts, fmt.Sprintf("[%s] %s", ktype, content))
-	}
-	if len(parts) == 0 {
-		return "No knots recorded"
-	}
-	if len(parts) > 5 {
-		parts = parts[:5]
-	}
-	return strings.Join(parts, "; ")
+	writeJSON(w, 200, map[string]string{"status": "ended"})
 }
 
 // --- Core chat endpoint ---
@@ -229,7 +157,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ConversationID int    `json:"conversation_id"`
+		ConversationID string `json:"conversation_id"`
 		Message        string `json:"message"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -237,281 +165,675 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build context
-	entities := getEntitiesText()
-	recentKnots := getRecentKnotsText(req.ConversationID)
-	schema, _ := getSchemaText()
-	systemPrompt := fmt.Sprintf(systemPromptTemplate, entities, recentKnots, schema)
-
-	// Get conversation history
 	convHistoryMu.RLock()
 	history := convHistory[req.ConversationID]
 	convHistoryMu.RUnlock()
 
-	// Build messages for Ollama
-	msgs := []message{{Role: "system", Content: systemPrompt}}
-	// Keep last 20 messages for context
-	if len(history) > 20 {
-		msgs = append(msgs, history[len(history)-20:]...)
-	} else {
-		msgs = append(msgs, history...)
-	}
-	msgs = append(msgs, message{Role: "user", Content: req.Message})
-
-	// Call Ollama
-	aiReply, err := queryOllama(msgs)
-	if err != nil {
-		log.Printf("ollama error: %v", err)
-		writeJSON(w, 502, map[string]string{"error": "AI service unavailable: " + err.Error()})
-		return
+	msgs := make([]anthropicMsg, len(history))
+	copy(msgs, history)
+	msgs = append(msgs, anthropicMsg{
+		Role:    "user",
+		Content: []contentPart{{Type: "text", Text: req.Message}},
+	})
+	if len(msgs) > 21 {
+		msgs = msgs[len(msgs)-21:]
 	}
 
-	// Parse structured response — strip markdown code fences if present
-	cleanJSON := extractJSONFromResponse(aiReply)
-	var agentResp agentResponse
-	if err := json.Unmarshal([]byte(cleanJSON), &agentResp); err != nil {
-		log.Printf("failed to parse agent JSON: %v, raw: %s", err, cleanJSON)
-		// Fallback: treat entire response as reply text
-		agentResp = agentResponse{Reply: aiReply}
+	var allKnots []knotJSON
+	var allEntities []entityJSON
+	var replyText string
+
+	for loop := 0; loop < 8; loop++ {
+		resp, err := callAnthropic(msgs)
+		if err != nil {
+			log.Printf("anthropic error: %v", err)
+			writeJSON(w, 502, map[string]string{"error": "AI service unavailable: " + err.Error()})
+			return
+		}
+
+		var assistantParts []contentPart
+		var toolCalls []contentPart
+
+		for _, block := range resp.Content {
+			switch block.Type {
+			case "text":
+				replyText = block.Text
+				assistantParts = append(assistantParts, block)
+			case "tool_use":
+				toolCalls = append(toolCalls, block)
+				assistantParts = append(assistantParts, block)
+			}
+		}
+
+		msgs = append(msgs, anthropicMsg{Role: "assistant", Content: assistantParts})
+
+		if len(toolCalls) == 0 || resp.StopReason == "end_turn" {
+			break
+		}
+
+		var toolResults []contentPart
+		for _, tc := range toolCalls {
+			result, knots, entities := executeToolCall(tc.Name, tc.Input)
+			allKnots = append(allKnots, knots...)
+			allEntities = append(allEntities, entities...)
+			toolResults = append(toolResults, contentPart{
+				Type:      "tool_result",
+				ToolUseID: tc.ID,
+				Content:   result,
+			})
+		}
+		msgs = append(msgs, anthropicMsg{Role: "user", Content: toolResults})
 	}
 
-	// Execute actions
-	createdKnots, retrievedKnots, createdEntities := executeActions(agentResp.Actions, req.ConversationID)
-
-	// Update conversation history
 	convHistoryMu.Lock()
 	convHistory[req.ConversationID] = append(convHistory[req.ConversationID],
-		message{Role: "user", Content: req.Message},
-		message{Role: "assistant", Content: agentResp.Reply},
+		anthropicMsg{Role: "user", Content: []contentPart{{Type: "text", Text: req.Message}}},
+		anthropicMsg{Role: "assistant", Content: []contentPart{{Type: "text", Text: replyText}}},
 	)
 	convHistoryMu.Unlock()
 
-	// Build response
-	allKnots := append(createdKnots, retrievedKnots...)
 	writeJSON(w, 200, chatResponse{
-		Reply:    agentResp.Reply,
+		Reply:    replyText,
 		Knots:    allKnots,
-		Entities: createdEntities,
+		Entities: allEntities,
 	})
 }
 
-type agentResponse struct {
-	Reply   string         `json:"reply"`
-	Actions []agentAction  `json:"actions"`
+// --- Anthropic API ---
+
+type anthropicRequest struct {
+	Model     string         `json:"model"`
+	MaxTokens int            `json:"max_tokens"`
+	System    string         `json:"system"`
+	Tools     []toolDef      `json:"tools"`
+	Messages  []anthropicMsg `json:"messages"`
 }
 
-type agentAction struct {
-	Action       string `json:"action"`
-	// create_knot fields
-	Content      string `json:"content,omitempty"`
-	Type         string `json:"type,omitempty"`
-	Importance   int    `json:"importance,omitempty"`
-	OccursAt     string `json:"occurs_at,omitempty"`
-	Status       string `json:"status,omitempty"`
-	// create_entity fields
-	Name         string `json:"name,omitempty"`
-	Kind         string `json:"kind,omitempty"`
-	Description  string `json:"description,omitempty"`
-	// link_entity fields
-	KnotIndex    int    `json:"knot_index,omitempty"`
-	EntityName   string `json:"entity_name,omitempty"`
-	Role         string `json:"role,omitempty"`
-	// create_nodino fields
-	KnotAIndex   int    `json:"knot_a_index,omitempty"`
-	KnotBID      int    `json:"knot_b_id,omitempty"`
-	Relationship string `json:"relationship,omitempty"`
-	// retrieve fields
-	Limit        int    `json:"limit,omitempty"`
+type anthropicResponse struct {
+	Content    []contentPart `json:"content"`
+	StopReason string        `json:"stop_reason"`
 }
 
-type knotJSON struct {
-	ID         int     `json:"id"`
-	Content    string  `json:"content"`
-	Type       string  `json:"type"`
-	Importance int     `json:"importance"`
-	OccursAt   *string `json:"occurs_at,omitempty"`
-	Status     *string `json:"status,omitempty"`
-	CreatedAt  string  `json:"created_at"`
+type toolDef struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	InputSchema interface{} `json:"input_schema"`
 }
 
-type entityJSON struct {
-	ID          int    `json:"id"`
-	Name        string `json:"name"`
-	Kind        string `json:"kind"`
-	Description string `json:"description"`
-}
-
-type chatResponse struct {
-	Reply    string       `json:"reply"`
-	Knots    []knotJSON   `json:"knots,omitempty"`
-	Entities []entityJSON `json:"entities,omitempty"`
-}
-
-func executeActions(actions []agentAction, convID int) (created []knotJSON, retrieved []knotJSON, entities []entityJSON) {
-	// Track created knot IDs by index for linking
-	knotIDs := make(map[int]int64)
-	// Track entity names to IDs
-	entityMap := make(map[string]int64)
-
-	for i, a := range actions {
-		switch a.Action {
-		case "create_knot":
-			imp := a.Importance
-			if imp < 1 {
-				imp = 3
-			}
-			if imp > 5 {
-				imp = 5
-			}
-			var occursAt interface{}
-			if a.OccursAt != "" && a.OccursAt != "null" {
-				occursAt = a.OccursAt
-			}
-			var status interface{}
-			if a.Status != "" && a.Status != "null" {
-				status = a.Status
-			} else if a.Type == "task" {
-				status = "todo"
-			}
-			result, err := db.Exec(
-				"INSERT INTO knots (conversation_id, content, type, importance, occurs_at, status) VALUES (?, ?, ?, ?, ?, ?)",
-				convID, a.Content, a.Type, imp, occursAt, status,
-			)
-			if err != nil {
-				log.Printf("create_knot error: %v", err)
-				continue
-			}
-			id, _ := result.LastInsertId()
-			knotIDs[i] = id
-			k := knotJSON{
-				ID:         int(id),
-				Content:    a.Content,
-				Type:       a.Type,
-				Importance: imp,
-				CreatedAt:  time.Now().Format("2006-01-02 15:04:05"),
-			}
-			if occursAt != nil {
-				s := a.OccursAt
-				k.OccursAt = &s
-			}
-			if status != nil {
-				s := status.(string)
-				k.Status = &s
-			}
-			created = append(created, k)
-
-		case "create_entity":
-			// Check if entity already exists
-			var existingID int64
-			err := db.QueryRow("SELECT id FROM entities WHERE name = ?", a.Name).Scan(&existingID)
-			if err == nil {
-				// Update existing entity
-				if a.Description != "" {
-					db.Exec("UPDATE entities SET description = ?, updated_at = NOW() WHERE id = ?", a.Description, existingID)
-				}
-				entityMap[a.Name] = existingID
-				entities = append(entities, entityJSON{
-					ID: int(existingID), Name: a.Name, Kind: a.Kind, Description: a.Description,
-				})
-				continue
-			}
-			result, err := db.Exec(
-				"INSERT INTO entities (name, kind, description) VALUES (?, ?, ?)",
-				a.Name, a.Kind, a.Description,
-			)
-			if err != nil {
-				log.Printf("create_entity error: %v", err)
-				continue
-			}
-			id, _ := result.LastInsertId()
-			entityMap[a.Name] = id
-			entities = append(entities, entityJSON{
-				ID: int(id), Name: a.Name, Kind: a.Kind, Description: a.Description,
-			})
-
-		case "link_entity":
-			knotID, ok := knotIDs[a.KnotIndex]
-			if !ok {
-				continue
-			}
-			entityID, ok := entityMap[a.EntityName]
-			if !ok {
-				// Try to find existing entity
-				err := db.QueryRow("SELECT id FROM entities WHERE name = ?", a.EntityName).Scan(&entityID)
-				if err != nil {
-					continue
-				}
-			}
-			db.Exec(
-				"INSERT IGNORE INTO knot_entities (knot_id, entity_id, role) VALUES (?, ?, ?)",
-				knotID, entityID, a.Role,
-			)
-
-		case "create_nodino":
-			knotAID, ok := knotIDs[a.KnotAIndex]
-			if !ok {
-				continue
-			}
-			if a.KnotBID <= 0 {
-				continue
-			}
-			rel := a.Relationship
-			if rel == "" {
-				rel = "related"
-			}
-			db.Exec(
-				"INSERT INTO nodinos (knot_a_id, knot_b_id, relationship) VALUES (?, ?, ?)",
-				knotAID, a.KnotBID, rel,
-			)
-
-		case "retrieve":
-			retrieved = append(retrieved, retrieveKnots(a.Type, a.Limit)...)
-		}
+func getTools() []toolDef {
+	return []toolDef{
+		{
+			Name:        "store_knot",
+			Description: "Store a piece of knowledge (a knot) in the memory palace. Use the appropriate room/type for categorization.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"content":    map[string]string{"type": "string", "description": "The knowledge content to store"},
+					"room":       map[string]string{"type": "string", "description": "Knot type: event, appointment, reminder, observation, mood, log, anecdote, idea, project, decision, contact, task"},
+					"importance": map[string]interface{}{"type": "integer", "description": "1-5 importance scale", "minimum": 1, "maximum": 5},
+					"occurs_at":  map[string]string{"type": "string", "description": "When this occurs (ISO datetime), if applicable"},
+					"status":     map[string]string{"type": "string", "description": "For tasks only: backlog, todo, in_progress, or done"},
+				},
+				"required": []string{"content", "room", "importance"},
+			},
+		},
+		{
+			Name:        "search_knowledge",
+			Description: "Search stored knowledge semantically. ALWAYS use this when referencing or discussing existing data — the user can only see data you retrieve.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"query": map[string]string{"type": "string", "description": "What to search for"},
+					"room":  map[string]string{"type": "string", "description": "Optional: filter by knot type (event, task, etc.)"},
+					"limit": map[string]interface{}{"type": "integer", "description": "Max results (default 10)", "minimum": 1, "maximum": 50},
+				},
+				"required": []string{"query"},
+			},
+		},
+		{
+			Name:        "add_entity",
+			Description: "Record a named entity (person, place, organization, animal, thing) in the knowledge graph.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name":        map[string]string{"type": "string", "description": "Entity name"},
+					"kind":        map[string]string{"type": "string", "description": "person, animal, place, organization, or thing"},
+					"description": map[string]string{"type": "string", "description": "Brief description"},
+				},
+				"required": []string{"name", "kind"},
+			},
+		},
+		{
+			Name:        "link_knowledge",
+			Description: "Create a relationship between two pieces of knowledge or between an entity and a knot in the knowledge graph.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"subject":      map[string]string{"type": "string", "description": "Source entity/knot name or ID"},
+					"predicate":    map[string]string{"type": "string", "description": "Relationship: same_thread, follow_up, caused_by, related, or a custom role"},
+					"object":       map[string]string{"type": "string", "description": "Target entity/knot name or ID"},
+					"valid_from":   map[string]string{"type": "string", "description": "When this relationship started (YYYY-MM-DD), if applicable"},
+				},
+				"required": []string{"subject", "predicate", "object"},
+			},
+		},
+		{
+			Name:        "set_task_status",
+			Description: "Update the status of a task knot (backlog, todo, in_progress, done).",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"knot_id":    map[string]string{"type": "string", "description": "The drawer ID of the task"},
+					"new_status": map[string]string{"type": "string", "description": "New status: backlog, todo, in_progress, or done"},
+				},
+				"required": []string{"knot_id", "new_status"},
+			},
+		},
+		{
+			Name:        "query_entity",
+			Description: "Look up everything known about a specific entity from the knowledge graph.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"entity_name": map[string]string{"type": "string", "description": "Name of the entity to look up"},
+				},
+				"required": []string{"entity_name"},
+			},
+		},
+		{
+			Name:        "query_calendar",
+			Description: "Query the user's Nextcloud calendar for upcoming or past events within a date range.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"from": map[string]string{"type": "string", "description": "Start date (YYYY-MM-DD). Defaults to today."},
+					"to":   map[string]string{"type": "string", "description": "End date (YYYY-MM-DD). Defaults to 7 days from start."},
+				},
+				"required": []string{},
+			},
+		},
+		{
+			Name:        "create_calendar_event",
+			Description: "Create a new event in the user's Nextcloud calendar.",
+			InputSchema: map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"summary":     map[string]string{"type": "string", "description": "Event title"},
+					"description": map[string]string{"type": "string", "description": "Event description"},
+					"start":       map[string]string{"type": "string", "description": "Start datetime (YYYY-MM-DDTHH:MM:SS)"},
+					"end":         map[string]string{"type": "string", "description": "End datetime (YYYY-MM-DDTHH:MM:SS)"},
+					"all_day":     map[string]interface{}{"type": "boolean", "description": "If true, create an all-day event (only date part of start/end is used)"},
+				},
+				"required": []string{"summary", "start"},
+			},
+		},
 	}
-	return
 }
 
-func retrieveKnots(ktype string, limit int) []knotJSON {
-	if limit <= 0 {
-		limit = 10
+func callAnthropic(msgs []anthropicMsg) (*anthropicResponse, error) {
+	reqBody := anthropicRequest{
+		Model:     anthropicModel,
+		MaxTokens: 4096,
+		System:    systemPrompt,
+		Tools:     getTools(),
+		Messages:  msgs,
 	}
-	var rows *sql.Rows
-	var err error
-	if ktype != "" {
-		rows, err = db.Query(
-			"SELECT id, content, type, importance, occurs_at, status, created_at FROM knots WHERE type = ? ORDER BY created_at DESC LIMIT ?",
-			ktype, limit,
-		)
-	} else {
-		rows, err = db.Query(
-			"SELECT id, content, type, importance, occurs_at, status, created_at FROM knots ORDER BY created_at DESC LIMIT ?",
-			limit,
-		)
-	}
+
+	body, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	defer rows.Close()
+
+	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", anthropicKey)
+	req.Header.Set("anthropic-version", "2023-06-01")
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reach Anthropic: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("anthropic returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result anthropicResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &result, nil
+}
+
+// --- Tool execution ---
+
+func executeToolCall(name string, rawInput json.RawMessage) (string, []knotJSON, []entityJSON) {
+	var input map[string]interface{}
+	json.Unmarshal(rawInput, &input)
+
+	switch name {
+	case "store_knot":
+		return toolStoreKnot(input)
+	case "search_knowledge":
+		return toolSearchKnowledge(input)
+	case "add_entity":
+		return toolAddEntity(input)
+	case "link_knowledge":
+		return toolLinkKnowledge(input)
+	case "set_task_status":
+		return toolSetTaskStatus(input)
+	case "query_entity":
+		return toolQueryEntity(input)
+	case "query_calendar":
+		return toolQueryCalendar(input)
+	case "create_calendar_event":
+		return toolCreateCalendarEvent(input)
+	default:
+		return fmt.Sprintf("unknown tool: %s", name), nil, nil
+	}
+}
+
+func toolStoreKnot(input map[string]interface{}) (string, []knotJSON, []entityJSON) {
+	content, _ := input["content"].(string)
+	room, _ := input["room"].(string)
+	importance := 3
+	if imp, ok := input["importance"].(float64); ok {
+		importance = int(imp)
+	}
+	occursAt, _ := input["occurs_at"].(string)
+	status, _ := input["status"].(string)
+
+	if room == "task" && status == "" {
+		status = "todo"
+	}
+
+	// Build content with metadata prefix
+	storedContent := fmt.Sprintf("[importance:%d]", importance)
+	if occursAt != "" {
+		storedContent += fmt.Sprintf("[occurs_at:%s]", occursAt)
+	}
+	if status != "" {
+		storedContent += fmt.Sprintf("[status:%s]", status)
+	}
+	storedContent += " " + content
+
+	drawerID, err := mpStoreDrawer(room, storedContent)
+	if err != nil {
+		return "error storing knot: " + err.Error(), nil, nil
+	}
+
+	if status != "" {
+		mpAddFact(drawerID, "has_status", status)
+	}
+
+	k := knotJSON{
+		ID:         drawerID,
+		Content:    content,
+		Type:       room,
+		Importance: importance,
+		CreatedAt:  time.Now().Format("2006-01-02 15:04:05"),
+	}
+	if occursAt != "" {
+		k.OccursAt = &occursAt
+	}
+	if status != "" {
+		k.Status = &status
+	}
+
+	return fmt.Sprintf("Stored knot %s in room '%s'", drawerID, room), []knotJSON{k}, nil
+}
+
+func toolSearchKnowledge(input map[string]interface{}) (string, []knotJSON, []entityJSON) {
+	query, _ := input["query"].(string)
+	room, _ := input["room"].(string)
+	limit := 10
+	if l, ok := input["limit"].(float64); ok {
+		limit = int(l)
+	}
+
+	results, err := mpSearch(query, room, limit)
+	if err != nil {
+		return "search error: " + err.Error(), nil, nil
+	}
 
 	var knots []knotJSON
-	for rows.Next() {
-		var k knotJSON
-		var occursAt sql.NullTime
-		var status sql.NullString
-		var createdAt time.Time
-		rows.Scan(&k.ID, &k.Content, &k.Type, &k.Importance, &occursAt, &status, &createdAt)
-		k.CreatedAt = createdAt.Format("2006-01-02 15:04:05")
-		if occursAt.Valid {
-			s := occursAt.Time.Format("2006-01-02 15:04:05")
-			k.OccursAt = &s
-		}
-		if status.Valid {
-			s := status.String
-			k.Status = &s
-		}
+	var summaryParts []string
+	for _, r := range results {
+		k := parseDrawerToKnot(r)
 		knots = append(knots, k)
+		summaryParts = append(summaryParts, fmt.Sprintf("[%s] %s", k.Type, k.Content))
 	}
-	return knots
+
+	if len(knots) == 0 {
+		return "No results found.", nil, nil
+	}
+
+	return fmt.Sprintf("Found %d results:\n%s", len(knots), strings.Join(summaryParts, "\n")), knots, nil
+}
+
+func toolAddEntity(input map[string]interface{}) (string, []knotJSON, []entityJSON) {
+	name, _ := input["name"].(string)
+	kind, _ := input["kind"].(string)
+	desc, _ := input["description"].(string)
+
+	mpAddFact(name, "is_a", kind)
+	if desc != "" {
+		mpAddFact(name, "described_as", desc)
+	}
+
+	e := entityJSON{
+		Name:        name,
+		Kind:        kind,
+		Description: desc,
+	}
+
+	return fmt.Sprintf("Recorded entity '%s' (%s)", name, kind), nil, []entityJSON{e}
+}
+
+func toolLinkKnowledge(input map[string]interface{}) (string, []knotJSON, []entityJSON) {
+	subject, _ := input["subject"].(string)
+	predicate, _ := input["predicate"].(string)
+	object, _ := input["object"].(string)
+	validFrom, _ := input["valid_from"].(string)
+
+	err := mpAddFactWithDate(subject, predicate, object, validFrom)
+	if err != nil {
+		return "error linking: " + err.Error(), nil, nil
+	}
+
+	return fmt.Sprintf("Linked '%s' -[%s]-> '%s'", subject, predicate, object), nil, nil
+}
+
+func toolSetTaskStatus(input map[string]interface{}) (string, []knotJSON, []entityJSON) {
+	knotID, _ := input["knot_id"].(string)
+	newStatus, _ := input["new_status"].(string)
+
+	mpInvalidateFact(knotID, "has_status")
+	mpAddFact(knotID, "has_status", newStatus)
+
+	return fmt.Sprintf("Task %s status set to '%s'", knotID, newStatus), nil, nil
+}
+
+func toolQueryEntity(input map[string]interface{}) (string, []knotJSON, []entityJSON) {
+	entityName, _ := input["entity_name"].(string)
+
+	facts, err := mpQueryEntity(entityName)
+	if err != nil {
+		return "error querying entity: " + err.Error(), nil, nil
+	}
+
+	if facts == "" {
+		return fmt.Sprintf("No information found about '%s'", entityName), nil, nil
+	}
+
+	return facts, nil, nil
+}
+
+// --- Mempalace REST client ---
+
+func mpStoreDrawer(room, content string) (string, error) {
+	payload := map[string]string{
+		"wing":    "nodino",
+		"room":    room,
+		"content": content,
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(mempalaceURL+"/drawers", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		return "", fmt.Errorf("mempalace store error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result map[string]interface{}
+	json.Unmarshal(respBody, &result)
+
+	if id, ok := result["drawer_id"].(string); ok {
+		return id, nil
+	}
+	if id, ok := result["id"].(string); ok {
+		return id, nil
+	}
+	return fmt.Sprintf("drawer_%d", time.Now().UnixNano()), nil
+}
+
+type searchResult struct {
+	ID       string  `json:"id"`
+	Content  string  `json:"content"`
+	Wing     string  `json:"wing"`
+	Room     string  `json:"room"`
+	Score    float64 `json:"score"`
+	FiledAt  string  `json:"filed_at"`
+}
+
+func mpSearch(query, room string, limit int) ([]searchResult, error) {
+	payload := map[string]interface{}{
+		"query": query,
+		"limit": limit,
+		"wing":  "nodino",
+	}
+	if room != "" {
+		payload["room"] = room
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(mempalaceURL+"/search", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("search error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var parsed struct {
+		Results []searchResult `json:"results"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		var directResults []searchResult
+		if err2 := json.Unmarshal(respBody, &directResults); err2 != nil {
+			return nil, fmt.Errorf("parse error: %w", err)
+		}
+		return directResults, nil
+	}
+	return parsed.Results, nil
+}
+
+func mpAddFact(subject, predicate, object string) error {
+	return mpAddFactWithDate(subject, predicate, object, "")
+}
+
+func mpAddFactWithDate(subject, predicate, object, validFrom string) error {
+	payload := map[string]string{
+		"subject":   subject,
+		"predicate": predicate,
+		"object":    object,
+	}
+	if validFrom != "" {
+		payload["valid_from"] = validFrom
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(mempalaceURL+"/kg/facts", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func mpInvalidateFact(subject, predicate string) error {
+	payload := map[string]string{
+		"subject":   subject,
+		"predicate": predicate,
+	}
+	body, _ := json.Marshal(payload)
+	resp, err := http.Post(mempalaceURL+"/kg/facts/invalidate", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+func mpQueryEntity(entity string) (string, error) {
+	resp, err := http.Get(fmt.Sprintf("%s/kg/query?entity=%s", mempalaceURL, entity))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("kg query error %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Facts []struct {
+			Subject   string `json:"subject"`
+			Predicate string `json:"predicate"`
+			Object    string `json:"object"`
+			ValidFrom string `json:"valid_from"`
+			ValidTo   string `json:"valid_to"`
+		} `json:"facts"`
+	}
+	json.Unmarshal(body, &result)
+
+	var lines []string
+	for _, f := range result.Facts {
+		line := fmt.Sprintf("%s %s %s", f.Subject, f.Predicate, f.Object)
+		if f.ValidFrom != "" {
+			line += fmt.Sprintf(" (from: %s)", f.ValidFrom)
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n"), nil
+}
+
+func mpGetTasksByStatus(statuses []string) ([]knotJSON, error) {
+	var allKnots []knotJSON
+
+	results, err := mpSearch("task", "task", 100)
+	if err != nil {
+		return nil, err
+	}
+
+	statusSet := make(map[string]bool)
+	for _, s := range statuses {
+		statusSet[s] = true
+	}
+
+	for _, r := range results {
+		k := parseDrawerToKnot(r)
+		if k.Status != nil && statusSet[*k.Status] {
+			allKnots = append(allKnots, k)
+		} else if k.Status == nil && statusSet["backlog"] {
+			s := "backlog"
+			k.Status = &s
+			allKnots = append(allKnots, k)
+		}
+	}
+
+	return allKnots, nil
+}
+
+// --- Drawer to knot parsing ---
+
+func parseDrawerToKnot(r searchResult) knotJSON {
+	k := knotJSON{
+		ID:         r.ID,
+		Type:       r.Room,
+		Importance: 3,
+		CreatedAt:  r.FiledAt,
+	}
+
+	content := r.Content
+
+	if strings.HasPrefix(content, "[") {
+		for strings.HasPrefix(content, "[") {
+			end := strings.Index(content, "]")
+			if end == -1 {
+				break
+			}
+			tag := content[1:end]
+			content = content[end+1:]
+
+			parts := strings.SplitN(tag, ":", 2)
+			if len(parts) != 2 {
+				break
+			}
+			switch parts[0] {
+			case "importance":
+				if v, err := strconv.Atoi(parts[1]); err == nil {
+					k.Importance = v
+				}
+			case "occurs_at":
+				s := parts[1]
+				k.OccursAt = &s
+			case "status":
+				s := parts[1]
+				k.Status = &s
+			}
+		}
+		content = strings.TrimSpace(content)
+	}
+
+	k.Content = content
+	return k
+}
+
+// --- STT proxy ---
+
+func handleTranscribe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	r.ParseMultipartForm(25 << 20)
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": "no audio file"})
+		return
+	}
+	defer file.Close()
+
+	var buf bytes.Buffer
+	writer := io.MultiWriter(&buf)
+	io.Copy(writer, file)
+
+	body := &bytes.Buffer{}
+	mpWriter := newMultipartWriter(body, header.Filename, buf.Bytes())
+
+	client := &http.Client{Timeout: 120 * time.Second}
+	resp, err := client.Post(whisperURL+"/transcribe", mpWriter.FormDataContentType(), body)
+	if err != nil {
+		writeJSON(w, 502, map[string]string{"error": "whisper unavailable: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		writeJSON(w, 502, map[string]string{"error": "whisper error: " + string(respBody)})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(respBody)
 }
 
 // --- TTS proxy ---
@@ -549,7 +871,7 @@ func handleSpeak(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-// --- Knots CRUD ---
+// --- Knots API (for kanban/todo) ---
 
 func handleKnots(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -572,196 +894,413 @@ func handleGetKnots(w http.ResponseWriter, r *http.Request) {
 			limit = l
 		}
 	}
-	writeJSON(w, 200, retrieveKnots(ktype, limit))
+
+	room := ktype
+	if room == "" {
+		room = ""
+	}
+
+	results, err := mpSearch("*", room, limit)
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+
+	var knots []knotJSON
+	for _, r := range results {
+		knots = append(knots, parseDrawerToKnot(r))
+	}
+
+	writeJSON(w, 200, knots)
 }
 
 func handleUpdateKnot(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID         int    `json:"id"`
-		Content    string `json:"content,omitempty"`
-		Importance int    `json:"importance,omitempty"`
-		Status     string `json:"status,omitempty"`
+		ID     string `json:"id"`
+		Status string `json:"status,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == 0 {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
 		writeJSON(w, 400, map[string]string{"error": "invalid request"})
 		return
 	}
 
-	if req.Content != "" {
-		db.Exec("UPDATE knots SET content = ? WHERE id = ?", req.Content, req.ID)
-	}
-	if req.Importance >= 1 && req.Importance <= 5 {
-		db.Exec("UPDATE knots SET importance = ? WHERE id = ?", req.Importance, req.ID)
-	}
 	if req.Status != "" {
-		db.Exec("UPDATE knots SET status = ? WHERE id = ?", req.Status, req.ID)
+		mpInvalidateFact(req.ID, "has_status")
+		mpAddFact(req.ID, "has_status", req.Status)
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "updated"})
 }
 
-// --- Ollama integration ---
+// --- Response types ---
 
-func queryOllama(msgs []message) (string, error) {
-	payload := map[string]interface{}{
-		"model":    ollamaModel,
-		"messages": msgs,
-		"stream":   false,
-		"format":   "json",
+type knotJSON struct {
+	ID         string  `json:"id"`
+	Content    string  `json:"content"`
+	Type       string  `json:"type"`
+	Importance int     `json:"importance"`
+	OccursAt   *string `json:"occurs_at,omitempty"`
+	Status     *string `json:"status,omitempty"`
+	CreatedAt  string  `json:"created_at"`
+}
+
+type entityJSON struct {
+	Name        string `json:"name"`
+	Kind        string `json:"kind"`
+	Description string `json:"description"`
+}
+
+type chatResponse struct {
+	Reply    string       `json:"reply"`
+	Knots    []knotJSON   `json:"knots,omitempty"`
+	Entities []entityJSON `json:"entities,omitempty"`
+}
+
+// --- Multipart helper ---
+
+type multipartBody struct {
+	contentType string
+}
+
+func (m *multipartBody) FormDataContentType() string {
+	return m.contentType
+}
+
+func newMultipartWriter(body *bytes.Buffer, filename string, data []byte) *multipartBody {
+	boundary := fmt.Sprintf("----nodino%d", time.Now().UnixNano())
+	ct := "multipart/form-data; boundary=" + boundary
+
+	body.WriteString("--" + boundary + "\r\n")
+	body.WriteString(fmt.Sprintf("Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n", filename))
+	body.WriteString("Content-Type: application/octet-stream\r\n\r\n")
+	body.Write(data)
+	body.WriteString("\r\n--" + boundary + "--\r\n")
+
+	return &multipartBody{contentType: ct}
+}
+
+// --- CalDAV integration ---
+
+func caldavClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: false},
+		},
+	}
+}
+
+func caldavRequest(method, url string, body string) ([]byte, error) {
+	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(nextcloudUser, nextcloudPass)
+	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+	req.Header.Set("Depth", "1")
+
+	resp, err := caldavClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
+type calMultistatus struct {
+	XMLName   xml.Name      `xml:"multistatus"`
+	Responses []calResponse `xml:"response"`
+}
+
+type calResponse struct {
+	Href    string     `xml:"href"`
+	Propstat calPropstat `xml:"propstat"`
+}
+
+type calPropstat struct {
+	Prop calProp `xml:"prop"`
+}
+
+type calProp struct {
+	CalendarData string `xml:"calendar-data"`
+	DisplayName  string `xml:"displayname"`
+}
+
+func toolQueryCalendar(input map[string]interface{}) (string, []knotJSON, []entityJSON) {
+	if calDavURL == "" {
+		return "Calendar not configured.", nil, nil
 	}
 
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
+	fromStr, _ := input["from"].(string)
+	toStr, _ := input["to"].(string)
+
+	now := time.Now()
+	var fromTime, toTime time.Time
+
+	if fromStr != "" {
+		t, err := time.Parse("2006-01-02", fromStr)
+		if err == nil {
+			fromTime = t
+		}
+	}
+	if fromTime.IsZero() {
+		fromTime = now
 	}
 
-	resp, err := http.Post(ollamaURL+"/api/chat", "application/json", bytes.NewReader(body))
+	if toStr != "" {
+		t, err := time.Parse("2006-01-02", toStr)
+		if err == nil {
+			toTime = t
+		}
+	}
+	if toTime.IsZero() {
+		toTime = fromTime.AddDate(0, 0, 7)
+	}
+
+	calURL := calDavURL + "/calendars/" + nextcloudUser + "/"
+
+	listBody, err := caldavRequest("PROPFIND", calURL, `<?xml version="1.0" encoding="utf-8" ?>
+<d:propfind xmlns:d="DAV:" xmlns:cs="urn:ietf:params:xml:ns:caldav">
+  <d:prop><d:displayname/></d:prop>
+</d:propfind>`)
 	if err != nil {
-		return "", fmt.Errorf("failed to reach Ollama: %w", err)
+		return "Calendar connection error: " + err.Error(), nil, nil
+	}
+
+	var listResult calMultistatus
+	xml.Unmarshal(listBody, &listResult)
+
+	var calendars []string
+	for _, r := range listResult.Responses {
+		parts := strings.Split(strings.TrimRight(r.Href, "/"), "/")
+		name := parts[len(parts)-1]
+		if name != "" && name != nextcloudUser {
+			calendars = append(calendars, name)
+		}
+	}
+
+	if len(calendars) == 0 {
+		calendars = []string{"personal"}
+	}
+
+	fromFmt := fromTime.UTC().Format("20060102T150405Z")
+	toFmt := toTime.UTC().Format("20060102T150405Z")
+
+	reportBody := fmt.Sprintf(`<?xml version="1.0" encoding="utf-8" ?>
+<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop>
+    <d:getetag/>
+    <c:calendar-data/>
+  </d:prop>
+  <c:filter>
+    <c:comp-filter name="VCALENDAR">
+      <c:comp-filter name="VEVENT">
+        <c:time-range start="%s" end="%s"/>
+      </c:comp-filter>
+    </c:comp-filter>
+  </c:filter>
+</c:calendar-query>`, fromFmt, toFmt)
+
+	var allEvents []string
+
+	for _, cal := range calendars {
+		eventURL := calDavURL + "/calendars/" + nextcloudUser + "/" + cal + "/"
+		respBody, err := caldavRequest("REPORT", eventURL, reportBody)
+		if err != nil {
+			continue
+		}
+
+		var result calMultistatus
+		xml.Unmarshal(respBody, &result)
+
+		for _, r := range result.Responses {
+			events := parseICalEvents(r.Propstat.Prop.CalendarData)
+			allEvents = append(allEvents, events...)
+		}
+	}
+
+	if len(allEvents) == 0 {
+		return fmt.Sprintf("No events found between %s and %s.", fromTime.Format("2006-01-02"), toTime.Format("2006-01-02")), nil, nil
+	}
+
+	var knots []knotJSON
+	for i, ev := range allEvents {
+		knots = append(knots, knotJSON{
+			ID:         fmt.Sprintf("cal_%d", i),
+			Content:    ev,
+			Type:       "appointment",
+			Importance: 3,
+			CreatedAt:  time.Now().Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	return fmt.Sprintf("Found %d events between %s and %s:\n%s",
+		len(allEvents), fromTime.Format("2006-01-02"), toTime.Format("2006-01-02"),
+		strings.Join(allEvents, "\n")), knots, nil
+}
+
+func parseICalEvents(ical string) []string {
+	var events []string
+	lines := strings.Split(ical, "\n")
+
+	var summary, dtstart, dtend, location, description string
+	inEvent := false
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "BEGIN:VEVENT" {
+			inEvent = true
+			summary, dtstart, dtend, location, description = "", "", "", "", ""
+		} else if line == "END:VEVENT" && inEvent {
+			ev := summary
+			if dtstart != "" {
+				start := formatICalDate(dtstart)
+				ev += " | " + start
+				if dtend != "" {
+					end := formatICalDate(dtend)
+					ev += " - " + end
+				}
+			}
+			if location != "" {
+				ev += " @ " + location
+			}
+			if description != "" {
+				ev += " (" + description + ")"
+			}
+			events = append(events, ev)
+			inEvent = false
+		} else if inEvent {
+			if strings.HasPrefix(line, "SUMMARY:") {
+				summary = strings.TrimPrefix(line, "SUMMARY:")
+			} else if strings.HasPrefix(line, "DTSTART") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					dtstart = parts[1]
+				}
+			} else if strings.HasPrefix(line, "DTEND") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					dtend = parts[1]
+				}
+			} else if strings.HasPrefix(line, "LOCATION:") {
+				location = strings.TrimPrefix(line, "LOCATION:")
+			} else if strings.HasPrefix(line, "DESCRIPTION:") {
+				desc := strings.TrimPrefix(line, "DESCRIPTION:")
+				desc = strings.ReplaceAll(desc, "\\n", " ")
+				if len(desc) > 100 {
+					desc = desc[:100] + "..."
+				}
+				description = desc
+			}
+		}
+	}
+	return events
+}
+
+func formatICalDate(s string) string {
+	for _, layout := range []string{"20060102T150405Z", "20060102T150405", "20060102"} {
+		t, err := time.Parse(layout, s)
+		if err == nil {
+			if layout == "20060102" {
+				return t.Format("2006-01-02")
+			}
+			return t.Local().Format("2006-01-02 15:04")
+		}
+	}
+	return s
+}
+
+func toolCreateCalendarEvent(input map[string]interface{}) (string, []knotJSON, []entityJSON) {
+	if calDavURL == "" {
+		return "Calendar not configured.", nil, nil
+	}
+
+	summary, _ := input["summary"].(string)
+	description, _ := input["description"].(string)
+	startStr, _ := input["start"].(string)
+	endStr, _ := input["end"].(string)
+	allDay, _ := input["all_day"].(bool)
+
+	if summary == "" || startStr == "" {
+		return "Missing required fields: summary and start", nil, nil
+	}
+
+	uid := fmt.Sprintf("nodino-%d@nodino", time.Now().UnixNano())
+
+	var dtstart, dtend string
+	if allDay {
+		t, err := time.Parse("2006-01-02", startStr[:10])
+		if err != nil {
+			return "Invalid start date: " + err.Error(), nil, nil
+		}
+		dtstart = "DTSTART;VALUE=DATE:" + t.Format("20060102")
+		if endStr != "" {
+			te, _ := time.Parse("2006-01-02", endStr[:10])
+			dtend = "DTEND;VALUE=DATE:" + te.AddDate(0, 0, 1).Format("20060102")
+		} else {
+			dtend = "DTEND;VALUE=DATE:" + t.AddDate(0, 0, 1).Format("20060102")
+		}
+	} else {
+		t, err := time.Parse("2006-01-02T15:04:05", startStr)
+		if err != nil {
+			t, err = time.Parse("2006-01-02T15:04", startStr)
+		}
+		if err != nil {
+			return "Invalid start datetime: " + err.Error(), nil, nil
+		}
+		dtstart = "DTSTART:" + t.UTC().Format("20060102T150405Z")
+		if endStr != "" {
+			te, err := time.Parse("2006-01-02T15:04:05", endStr)
+			if err != nil {
+				te, _ = time.Parse("2006-01-02T15:04", endStr)
+			}
+			dtend = "DTEND:" + te.UTC().Format("20060102T150405Z")
+		} else {
+			dtend = "DTEND:" + t.Add(time.Hour).UTC().Format("20060102T150405Z")
+		}
+	}
+
+	descLine := ""
+	if description != "" {
+		descLine = "DESCRIPTION:" + strings.ReplaceAll(description, "\n", "\\n") + "\n"
+	}
+
+	ical := fmt.Sprintf(`BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//nodino//EN
+BEGIN:VEVENT
+UID:%s
+DTSTAMP:%s
+%s
+%s
+SUMMARY:%s
+%sEND:VEVENT
+END:VCALENDAR`, uid, time.Now().UTC().Format("20060102T150405Z"), dtstart, dtend, summary, descLine)
+
+	eventURL := calDavURL + "/calendars/" + nextcloudUser + "/personal/" + uid + ".ics"
+
+	req, err := http.NewRequest("PUT", eventURL, strings.NewReader(ical))
+	if err != nil {
+		return "Error creating request: " + err.Error(), nil, nil
+	}
+	req.SetBasicAuth(nextcloudUser, nextcloudPass)
+	req.Header.Set("Content-Type", "text/calendar; charset=utf-8")
+
+	resp, err := caldavClient().Do(req)
+	if err != nil {
+		return "Calendar error: " + err.Error(), nil, nil
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("failed to read Ollama response: %w", err)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return fmt.Sprintf("Created calendar event '%s' on %s", summary, startStr), nil, nil
 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("ollama returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		Message struct {
-			Content string `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("failed to parse Ollama response: %w", err)
-	}
-
-	return result.Message.Content, nil
-}
-
-// --- Context helpers ---
-
-func getEntitiesText() string {
-	rows, err := db.Query("SELECT name, kind, description FROM entities ORDER BY updated_at DESC LIMIT 50")
-	if err != nil {
-		return "(none)"
-	}
-	defer rows.Close()
-
-	var buf strings.Builder
-	count := 0
-	for rows.Next() {
-		var name, kind string
-		var desc sql.NullString
-		rows.Scan(&name, &kind, &desc)
-		buf.WriteString(fmt.Sprintf("- %s (%s)", name, kind))
-		if desc.Valid && desc.String != "" {
-			buf.WriteString(": " + desc.String)
-		}
-		buf.WriteString("\n")
-		count++
-	}
-	if count == 0 {
-		return "(none yet)"
-	}
-	return buf.String()
-}
-
-func getRecentKnotsText(convID int) string {
-	rows, err := db.Query(
-		"SELECT id, content, type, importance, occurs_at FROM knots ORDER BY created_at DESC LIMIT 30",
-	)
-	if err != nil {
-		return "(none)"
-	}
-	defer rows.Close()
-
-	var buf strings.Builder
-	count := 0
-	for rows.Next() {
-		var id, importance int
-		var content, ktype string
-		var occursAt sql.NullTime
-		rows.Scan(&id, &content, &ktype, &importance, &occursAt)
-		buf.WriteString(fmt.Sprintf("- [id:%d] [%s] (imp:%d) %s", id, ktype, importance, content))
-		if occursAt.Valid {
-			buf.WriteString(fmt.Sprintf(" (occurs: %s)", occursAt.Time.Format("2006-01-02 15:04")))
-		}
-		buf.WriteString("\n")
-		count++
-	}
-	if count == 0 {
-		return "(none yet)"
-	}
-	return buf.String()
-}
-
-func getSchemaText() (string, error) {
-	rows, err := db.Query("SHOW TABLES")
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-
-	var buf strings.Builder
-	var tables []string
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			return "", err
-		}
-		tables = append(tables, table)
-	}
-
-	for _, table := range tables {
-		buf.WriteString(fmt.Sprintf("TABLE: %s\n", table))
-		colRows, err := db.Query(fmt.Sprintf("SHOW COLUMNS FROM `%s`", table))
-		if err != nil {
-			return "", err
-		}
-		for colRows.Next() {
-			var field, colType, null, key string
-			var defVal, extra sql.NullString
-			if err := colRows.Scan(&field, &colType, &null, &key, &defVal, &extra); err != nil {
-				colRows.Close()
-				return "", err
-			}
-			buf.WriteString(fmt.Sprintf("  - %s %s", field, colType))
-			if key == "PRI" {
-				buf.WriteString(" PRIMARY KEY")
-			}
-			if extra.Valid && extra.String != "" {
-				buf.WriteString(" " + extra.String)
-			}
-			buf.WriteString("\n")
-		}
-		colRows.Close()
-		buf.WriteString("\n")
-	}
-
-	return buf.String(), nil
+	body, _ := io.ReadAll(resp.Body)
+	return fmt.Sprintf("Calendar error %d: %s", resp.StatusCode, string(body)), nil, nil
 }
 
 // --- Helpers ---
-
-var jsonFenceRe = regexp.MustCompile("(?s)```(?:json)?\\s*\n?(.*?)```")
-
-func extractJSONFromResponse(raw string) string {
-	// Try raw string first
-	trimmed := strings.TrimSpace(raw)
-	if len(trimmed) > 0 && trimmed[0] == '{' {
-		return trimmed
-	}
-	// Try extracting from markdown code fence
-	matches := jsonFenceRe.FindStringSubmatch(raw)
-	if len(matches) >= 2 {
-		return strings.TrimSpace(matches[1])
-	}
-	return trimmed
-}
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")

@@ -1,2 +1,4 @@
 resume.sh
+.env
 nginx/certs/
+mempalace-data/

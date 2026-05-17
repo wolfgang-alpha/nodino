@@ -1,17 +1,34 @@
 services:
-  mariadb:
-    image: mariadb:11
+  chroma:
+    image: chromadb/chroma:0.6.3
     restart: unless-stopped
     environment:
-      MARIADB_ROOT_PASSWORD: nodino
-      MARIADB_DATABASE: nodino
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /data
+      ANONYMIZED_TELEMETRY: "FALSE"
     volumes:
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./mempalace-data/chroma:/data
+
+  mempalace-api:
+    build: ./mempalace
+    restart: unless-stopped
+    depends_on:
+      - chroma
+    environment:
+      CHROMA_HOST: chroma
+      CHROMA_PORT: "8000"
+      HOME: /data
+    volumes:
+      - ./mempalace-data:/data
     healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  whisper:
+    build: ./whisper
+    restart: unless-stopped
 
   piper:
     build: ./piper
@@ -23,13 +40,17 @@ services:
     build: ./backend
     restart: unless-stopped
     depends_on:
-      mariadb:
+      mempalace-api:
         condition: service_healthy
     environment:
-      DB_DSN: "root:nodino@tcp(mariadb:3306)/nodino"
-      OLLAMA_URL: "http://192.168.0.132:11434"
-      OLLAMA_MODEL: "devstral-2:123b-cloud"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ANTHROPIC_MODEL: "claude-sonnet-4-6"
+      MEMPALACE_URL: "http://mempalace-api:8000"
+      WHISPER_URL: "http://whisper:5001"
       PIPER_URL: "http://piper:5000"
+      CAL_DAV: "${CAL_DAV}"
+      NEXTCLOUD_USER: "${NEXTCLOUD_USER}"
+      NEXTCLOUD_PASSWORD: "${NEXTCLOUD_PASSWORD}"
 
   nginx:
     image: nginx:alpine
