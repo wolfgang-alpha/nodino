@@ -76,3 +76,7 @@ event, appointment, reminder, observation, mood, log, anecdote, idea, project, d
 - Todo list view (todo + in-progress only)
 - Auto dark/light mode
 - TTS playback of agent responses
+
+## Credits
+
+Semantic memory and knowledge graph powered by [MemPalace](https://github.com/MemPalace/mempalace) — a personal memory system for AI agents that stores verbatim knowledge in ChromaDB with a temporal knowledge graph in SQLite.
