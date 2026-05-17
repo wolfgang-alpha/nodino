@@ -2,10 +2,6 @@
   <img src="logo.png" alt="nodino" width="200">
 </p>
 
-<h1 align="center">nodino</h1>
-
-<p align="center"><em>"little knot" in Italian</em></p>
-
 ---
 
 A voice-first second-brain agent that extracts structured knowledge from natural conversation, stores it in a semantic memory palace, and displays it as fading data cards in real time.
