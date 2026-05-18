@@ -12,7 +12,7 @@ You talk (or type), the agent listens. Behind the scenes it creates knots (event
 
 | Service | Role |
 |---------|------|
-| **backend** | Go API server, Anthropic Claude tool-use orchestration |
+| **backend** | Go API server, Ollama tool-use orchestration |
 | **mempalace-api** | Semantic memory store + knowledge graph (REST) |
 | **chroma** | ChromaDB vector database (internal to mempalace) |
 | **whisper** | Speech-to-text via faster-whisper (medium.en) |
@@ -21,10 +21,11 @@ You talk (or type), the agent listens. Behind the scenes it creates knots (event
 
 ## Quick Start
 
-Create a `.env` file:
+Make sure Ollama is running on your network with `devstral-2:123b-cloud` (or your preferred model). Update `OLLAMA_URL` and `OLLAMA_MODEL` in `docker-compose.yml` if needed.
+
+Optionally create a `.env` file for Nextcloud calendar integration:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
 CAL_DAV=https://your-nextcloud.example.com/remote.php/dav
 NEXTCLOUD_USER=your_username
 NEXTCLOUD_PASSWORD=your_app_password
@@ -38,13 +39,13 @@ docker compose up --build
 
 Open `https://<host>:8890` (self-signed cert) or `http://localhost:8889`.
 
-The Nextcloud calendar variables are optional — the agent works without them but won't have calendar access.
+The Nextcloud calendar variables are optional — the agent works without them but won't have calendar access. The `.env` file is gitignored.
 
 ## How It Works
 
 1. Speak into the microphone or type a message
-2. Audio is transcribed by Whisper; text is sent to Claude via the Anthropic API
-3. Claude uses tools to store knots, search knowledge, manage entities, link relationships, and query/create calendar events — all backed by mempalace's semantic search, knowledge graph, and Nextcloud CalDAV
+2. Audio is transcribed by Whisper; text is sent to the LLM via Ollama
+3. The model uses tools to store knots, search knowledge, manage entities, link relationships, and query/create calendar events — all backed by mempalace's semantic search, knowledge graph, and Nextcloud CalDAV
 4. New data cards appear in the center column, agent replies are spoken via Piper TTS
 5. Cards age and fade out over time; drag to pin important ones
 

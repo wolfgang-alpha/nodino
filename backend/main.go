@@ -16,29 +16,53 @@ import (
 	"time"
 )
 
-var mempalaceURL, anthropicKey, anthropicModel, piperURL, whisperURL string
+var mempalaceURL, ollamaURL, ollamaModel, piperURL, whisperURL string
 var calDavURL, nextcloudUser, nextcloudPass string
 
 var (
-	convHistory   = make(map[string][]anthropicMsg)
+	convHistory   = make(map[string][]ollamaMsg)
 	convHistoryMu sync.RWMutex
 	convCounter   int
 	convCounterMu sync.Mutex
 )
 
-type anthropicMsg struct {
-	Role    string        `json:"role"`
-	Content []contentPart `json:"content"`
+type ollamaMsg struct {
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
 }
 
-type contentPart struct {
-	Type      string          `json:"type"`
-	Text      string          `json:"text,omitempty"`
-	ID        string          `json:"id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Input     json.RawMessage `json:"input,omitempty"`
-	ToolUseID string          `json:"tool_use_id,omitempty"`
-	Content   string          `json:"content,omitempty"`
+type ollamaToolCall struct {
+	Function ollamaFuncCall `json:"function"`
+}
+
+type ollamaFuncCall struct {
+	Name      string                 `json:"name"`
+	Arguments map[string]interface{} `json:"arguments"`
+}
+
+type ollamaRequest struct {
+	Model    string      `json:"model"`
+	Messages []ollamaMsg `json:"messages"`
+	Tools    []ollamaTool `json:"tools"`
+	Stream   bool        `json:"stream"`
+}
+
+type ollamaResponse struct {
+	Message    ollamaMsg `json:"message"`
+	Done       bool      `json:"done"`
+	DoneReason string    `json:"done_reason"`
+}
+
+type ollamaTool struct {
+	Type     string     `json:"type"`
+	Function ollamaFunc `json:"function"`
+}
+
+type ollamaFunc struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Parameters  interface{} `json:"parameters"`
 }
 
 const systemPrompt = `You are nodino, a second-brain assistant. You listen to the user and extract structured knowledge from natural conversation. You store information as "knots" in a memory palace using the tools provided.
@@ -67,17 +91,13 @@ RELATIONSHIP TYPES: same_thread, follow_up, caused_by, related`
 
 func main() {
 	mempalaceURL = envOr("MEMPALACE_URL", "http://mempalace-api:8000")
-	anthropicKey = envOr("ANTHROPIC_API_KEY", "")
-	anthropicModel = envOr("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+	ollamaURL = envOr("OLLAMA_URL", "http://192.168.0.132:11434")
+	ollamaModel = envOr("OLLAMA_MODEL", "devstral-2:123b-cloud")
 	piperURL = envOr("PIPER_URL", "http://piper:5000")
 	whisperURL = envOr("WHISPER_URL", "http://whisper:5001")
 	calDavURL = envOr("CAL_DAV", "")
 	nextcloudUser = envOr("NEXTCLOUD_USER", "")
 	nextcloudPass = envOr("NEXTCLOUD_PASSWORD", "")
-
-	if anthropicKey == "" {
-		log.Fatal("ANTHROPIC_API_KEY is required")
-	}
 
 	waitForMempalace()
 
@@ -122,7 +142,7 @@ func handleConversationStart(w http.ResponseWriter, r *http.Request) {
 	convCounterMu.Unlock()
 
 	convHistoryMu.Lock()
-	convHistory[id] = []anthropicMsg{}
+	convHistory[id] = []ollamaMsg{}
 	convHistoryMu.Unlock()
 
 	writeJSON(w, 200, map[string]string{"conversation_id": id})
@@ -169,12 +189,9 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	history := convHistory[req.ConversationID]
 	convHistoryMu.RUnlock()
 
-	msgs := make([]anthropicMsg, len(history))
+	msgs := make([]ollamaMsg, len(history))
 	copy(msgs, history)
-	msgs = append(msgs, anthropicMsg{
-		Role:    "user",
-		Content: []contentPart{{Type: "text", Text: req.Message}},
-	})
+	msgs = append(msgs, ollamaMsg{Role: "user", Content: req.Message})
 	if len(msgs) > 21 {
 		msgs = msgs[len(msgs)-21:]
 	}
@@ -184,51 +201,33 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	var replyText string
 
 	for loop := 0; loop < 8; loop++ {
-		resp, err := callAnthropic(msgs)
+		resp, err := callOllama(msgs)
 		if err != nil {
-			log.Printf("anthropic error: %v", err)
+			log.Printf("ollama error: %v", err)
 			writeJSON(w, 502, map[string]string{"error": "AI service unavailable: " + err.Error()})
 			return
 		}
 
-		var assistantParts []contentPart
-		var toolCalls []contentPart
+		replyText = resp.Message.Content
 
-		for _, block := range resp.Content {
-			switch block.Type {
-			case "text":
-				replyText = block.Text
-				assistantParts = append(assistantParts, block)
-			case "tool_use":
-				toolCalls = append(toolCalls, block)
-				assistantParts = append(assistantParts, block)
-			}
-		}
-
-		msgs = append(msgs, anthropicMsg{Role: "assistant", Content: assistantParts})
-
-		if len(toolCalls) == 0 || resp.StopReason == "end_turn" {
+		if len(resp.Message.ToolCalls) == 0 {
 			break
 		}
 
-		var toolResults []contentPart
-		for _, tc := range toolCalls {
-			result, knots, entities := executeToolCall(tc.Name, tc.Input)
+		msgs = append(msgs, resp.Message)
+
+		for _, tc := range resp.Message.ToolCalls {
+			result, knots, entities := executeToolCall(tc.Function.Name, tc.Function.Arguments)
 			allKnots = append(allKnots, knots...)
 			allEntities = append(allEntities, entities...)
-			toolResults = append(toolResults, contentPart{
-				Type:      "tool_result",
-				ToolUseID: tc.ID,
-				Content:   result,
-			})
+			msgs = append(msgs, ollamaMsg{Role: "tool", Content: result})
 		}
-		msgs = append(msgs, anthropicMsg{Role: "user", Content: toolResults})
 	}
 
 	convHistoryMu.Lock()
 	convHistory[req.ConversationID] = append(convHistory[req.ConversationID],
-		anthropicMsg{Role: "user", Content: []contentPart{{Type: "text", Text: req.Message}}},
-		anthropicMsg{Role: "assistant", Content: []contentPart{{Type: "text", Text: replyText}}},
+		ollamaMsg{Role: "user", Content: req.Message},
+		ollamaMsg{Role: "assistant", Content: replyText},
 	)
 	convHistoryMu.Unlock()
 
@@ -239,33 +238,17 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// --- Anthropic API ---
+// --- Ollama API ---
 
-type anthropicRequest struct {
-	Model     string         `json:"model"`
-	MaxTokens int            `json:"max_tokens"`
-	System    string         `json:"system"`
-	Tools     []toolDef      `json:"tools"`
-	Messages  []anthropicMsg `json:"messages"`
-}
-
-type anthropicResponse struct {
-	Content    []contentPart `json:"content"`
-	StopReason string        `json:"stop_reason"`
-}
-
-type toolDef struct {
-	Name        string      `json:"name"`
-	Description string      `json:"description"`
-	InputSchema interface{} `json:"input_schema"`
-}
-
-func getTools() []toolDef {
-	return []toolDef{
-		{
-			Name:        "store_knot",
-			Description: "Store a piece of knowledge (a knot) in the memory palace. Use the appropriate room/type for categorization.",
-			InputSchema: map[string]interface{}{
+func getTools() []ollamaTool {
+	mkTool := func(name, desc string, params interface{}) ollamaTool {
+		return ollamaTool{
+			Type:     "function",
+			Function: ollamaFunc{Name: name, Description: desc, Parameters: params},
+		}
+	}
+	return []ollamaTool{
+		mkTool("store_knot", "Store a piece of knowledge (a knot) in the memory palace. Use the appropriate room/type for categorization.", map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"content":    map[string]string{"type": "string", "description": "The knowledge content to store"},
@@ -275,108 +258,80 @@ func getTools() []toolDef {
 					"status":     map[string]string{"type": "string", "description": "For tasks only: backlog, todo, in_progress, or done"},
 				},
 				"required": []string{"content", "room", "importance"},
+			}),
+		mkTool("search_knowledge", "Search stored knowledge semantically. ALWAYS use this when referencing or discussing existing data — the user can only see data you retrieve.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"query": map[string]string{"type": "string", "description": "What to search for"},
+				"room":  map[string]string{"type": "string", "description": "Optional: filter by knot type (event, task, etc.)"},
+				"limit": map[string]interface{}{"type": "integer", "description": "Max results (default 10)", "minimum": 1, "maximum": 50},
 			},
-		},
-		{
-			Name:        "search_knowledge",
-			Description: "Search stored knowledge semantically. ALWAYS use this when referencing or discussing existing data — the user can only see data you retrieve.",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"query": map[string]string{"type": "string", "description": "What to search for"},
-					"room":  map[string]string{"type": "string", "description": "Optional: filter by knot type (event, task, etc.)"},
-					"limit": map[string]interface{}{"type": "integer", "description": "Max results (default 10)", "minimum": 1, "maximum": 50},
-				},
-				"required": []string{"query"},
+			"required": []string{"query"},
+		}),
+		mkTool("add_entity", "Record a named entity (person, place, organization, animal, thing) in the knowledge graph.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"name":        map[string]string{"type": "string", "description": "Entity name"},
+				"kind":        map[string]string{"type": "string", "description": "person, animal, place, organization, or thing"},
+				"description": map[string]string{"type": "string", "description": "Brief description"},
 			},
-		},
-		{
-			Name:        "add_entity",
-			Description: "Record a named entity (person, place, organization, animal, thing) in the knowledge graph.",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"name":        map[string]string{"type": "string", "description": "Entity name"},
-					"kind":        map[string]string{"type": "string", "description": "person, animal, place, organization, or thing"},
-					"description": map[string]string{"type": "string", "description": "Brief description"},
-				},
-				"required": []string{"name", "kind"},
+			"required": []string{"name", "kind"},
+		}),
+		mkTool("link_knowledge", "Create a relationship between two pieces of knowledge or between an entity and a knot in the knowledge graph.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"subject":    map[string]string{"type": "string", "description": "Source entity/knot name or ID"},
+				"predicate":  map[string]string{"type": "string", "description": "Relationship: same_thread, follow_up, caused_by, related, or a custom role"},
+				"object":     map[string]string{"type": "string", "description": "Target entity/knot name or ID"},
+				"valid_from": map[string]string{"type": "string", "description": "When this relationship started (YYYY-MM-DD), if applicable"},
 			},
-		},
-		{
-			Name:        "link_knowledge",
-			Description: "Create a relationship between two pieces of knowledge or between an entity and a knot in the knowledge graph.",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"subject":      map[string]string{"type": "string", "description": "Source entity/knot name or ID"},
-					"predicate":    map[string]string{"type": "string", "description": "Relationship: same_thread, follow_up, caused_by, related, or a custom role"},
-					"object":       map[string]string{"type": "string", "description": "Target entity/knot name or ID"},
-					"valid_from":   map[string]string{"type": "string", "description": "When this relationship started (YYYY-MM-DD), if applicable"},
-				},
-				"required": []string{"subject", "predicate", "object"},
+			"required": []string{"subject", "predicate", "object"},
+		}),
+		mkTool("set_task_status", "Update the status of a task knot (backlog, todo, in_progress, done).", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"knot_id":    map[string]string{"type": "string", "description": "The drawer ID of the task"},
+				"new_status": map[string]string{"type": "string", "description": "New status: backlog, todo, in_progress, or done"},
 			},
-		},
-		{
-			Name:        "set_task_status",
-			Description: "Update the status of a task knot (backlog, todo, in_progress, done).",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"knot_id":    map[string]string{"type": "string", "description": "The drawer ID of the task"},
-					"new_status": map[string]string{"type": "string", "description": "New status: backlog, todo, in_progress, or done"},
-				},
-				"required": []string{"knot_id", "new_status"},
+			"required": []string{"knot_id", "new_status"},
+		}),
+		mkTool("query_entity", "Look up everything known about a specific entity from the knowledge graph.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"entity_name": map[string]string{"type": "string", "description": "Name of the entity to look up"},
 			},
-		},
-		{
-			Name:        "query_entity",
-			Description: "Look up everything known about a specific entity from the knowledge graph.",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"entity_name": map[string]string{"type": "string", "description": "Name of the entity to look up"},
-				},
-				"required": []string{"entity_name"},
+			"required": []string{"entity_name"},
+		}),
+		mkTool("query_calendar", "Query the user's Nextcloud calendar for upcoming or past events within a date range.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"from": map[string]string{"type": "string", "description": "Start date (YYYY-MM-DD). Defaults to today."},
+				"to":   map[string]string{"type": "string", "description": "End date (YYYY-MM-DD). Defaults to 7 days from start."},
 			},
-		},
-		{
-			Name:        "query_calendar",
-			Description: "Query the user's Nextcloud calendar for upcoming or past events within a date range.",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"from": map[string]string{"type": "string", "description": "Start date (YYYY-MM-DD). Defaults to today."},
-					"to":   map[string]string{"type": "string", "description": "End date (YYYY-MM-DD). Defaults to 7 days from start."},
-				},
-				"required": []string{},
+			"required": []string{},
+		}),
+		mkTool("create_calendar_event", "Create a new event in the user's Nextcloud calendar.", map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"summary":     map[string]string{"type": "string", "description": "Event title"},
+				"description": map[string]string{"type": "string", "description": "Event description"},
+				"start":       map[string]string{"type": "string", "description": "Start datetime (YYYY-MM-DDTHH:MM:SS)"},
+				"end":         map[string]string{"type": "string", "description": "End datetime (YYYY-MM-DDTHH:MM:SS)"},
+				"all_day":     map[string]interface{}{"type": "boolean", "description": "If true, create an all-day event (only date part of start/end is used)"},
 			},
-		},
-		{
-			Name:        "create_calendar_event",
-			Description: "Create a new event in the user's Nextcloud calendar.",
-			InputSchema: map[string]interface{}{
-				"type": "object",
-				"properties": map[string]interface{}{
-					"summary":     map[string]string{"type": "string", "description": "Event title"},
-					"description": map[string]string{"type": "string", "description": "Event description"},
-					"start":       map[string]string{"type": "string", "description": "Start datetime (YYYY-MM-DDTHH:MM:SS)"},
-					"end":         map[string]string{"type": "string", "description": "End datetime (YYYY-MM-DDTHH:MM:SS)"},
-					"all_day":     map[string]interface{}{"type": "boolean", "description": "If true, create an all-day event (only date part of start/end is used)"},
-				},
-				"required": []string{"summary", "start"},
-			},
-		},
+			"required": []string{"summary", "start"},
+		}),
 	}
 }
 
-func callAnthropic(msgs []anthropicMsg) (*anthropicResponse, error) {
-	reqBody := anthropicRequest{
-		Model:     anthropicModel,
-		MaxTokens: 4096,
-		System:    systemPrompt,
-		Tools:     getTools(),
-		Messages:  msgs,
+func callOllama(msgs []ollamaMsg) (*ollamaResponse, error) {
+	fullMsgs := append([]ollamaMsg{{Role: "system", Content: systemPrompt}}, msgs...)
+
+	reqBody := ollamaRequest{
+		Model:    ollamaModel,
+		Messages: fullMsgs,
+		Tools:    getTools(),
+		Stream:   false,
 	}
 
 	body, err := json.Marshal(reqBody)
@@ -384,15 +339,10 @@ func callAnthropic(msgs []anthropicMsg) (*anthropicResponse, error) {
 		return nil, err
 	}
 
-	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", anthropicKey)
-	req.Header.Set("anthropic-version", "2023-06-01")
-
-	client := &http.Client{Timeout: 120 * time.Second}
-	resp, err := client.Do(req)
+	client := &http.Client{Timeout: 180 * time.Second}
+	resp, err := client.Post(ollamaURL+"/api/chat", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("failed to reach Anthropic: %w", err)
+		return nil, fmt.Errorf("failed to reach Ollama: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -402,10 +352,10 @@ func callAnthropic(msgs []anthropicMsg) (*anthropicResponse, error) {
 	}
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("anthropic returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("ollama returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var result anthropicResponse
+	var result ollamaResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
@@ -415,10 +365,7 @@ func callAnthropic(msgs []anthropicMsg) (*anthropicResponse, error) {
 
 // --- Tool execution ---
 
-func executeToolCall(name string, rawInput json.RawMessage) (string, []knotJSON, []entityJSON) {
-	var input map[string]interface{}
-	json.Unmarshal(rawInput, &input)
-
+func executeToolCall(name string, input map[string]interface{}) (string, []knotJSON, []entityJSON) {
 	switch name {
 	case "store_knot":
 		return toolStoreKnot(input)

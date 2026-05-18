@@ -43,8 +43,8 @@ services:
       mempalace-api:
         condition: service_healthy
     environment:
-      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
-      ANTHROPIC_MODEL: "claude-sonnet-4-6"
+      OLLAMA_URL: "http://192.168.0.132:11434"
+      OLLAMA_MODEL: "devstral-2:123b-cloud"
       MEMPALACE_URL: "http://mempalace-api:8000"
       WHISPER_URL: "http://whisper:5001"
       PIPER_URL: "http://piper:5000"
