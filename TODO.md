@@ -4,7 +4,9 @@
 
 - Speech-to-text via faster-whisper (medium.en model, int8 quantization)
 - Mempalace integration (semantic search + knowledge graph)
-- Ollama tool-use orchestration (devstral-2)
+- Claude Code CLI as AI backbone (Max subscription, MCP tools)
+- Mempalace MCP server for tool-use access
+- CalDAV integration via MCP
 
 ## Future
 

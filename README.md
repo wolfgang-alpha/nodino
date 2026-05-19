@@ -10,58 +10,62 @@ You talk (or type), the agent listens. Behind the scenes it creates knots (event
 
 ## Architecture
 
-| Service | Role |
-|---------|------|
-| **backend** | Go API server, Ollama tool-use orchestration |
+| Component | Role |
+|-----------|------|
+| **backend** | Go server on host, spawns `claude -p` for AI (Max subscription) |
+| **mempalace-mcp** | MCP server exposing mempalace tools to Claude |
 | **mempalace-api** | Semantic memory store + knowledge graph (REST) |
 | **chroma** | ChromaDB vector database (internal to mempalace) |
 | **whisper** | Speech-to-text via faster-whisper (medium.en) |
 | **piper** | Text-to-speech via Piper TTS |
 | **nginx** | Static frontend + HTTPS reverse proxy |
 
+Claude Code is the AI backbone — the same tools available in the webui are available in your terminal Claude Code sessions via MCP.
+
 ## Quick Start
 
-Make sure Ollama is running on your network with `devstral-2:123b-cloud` (or your preferred model). Update `OLLAMA_URL` and `OLLAMA_MODEL` in `docker-compose.yml` if needed.
-
-Optionally create a `.env` file for Nextcloud calendar integration:
-
-```
-CAL_DAV=https://your-nextcloud.example.com/remote.php/dav
-NEXTCLOUD_USER=your_username
-NEXTCLOUD_PASSWORD=your_app_password
-```
-
-Then run:
+Prerequisites: Claude Code CLI installed with a Max subscription, Docker.
 
 ```bash
-docker compose up --build
+# Start Docker services
+docker compose up --build -d
+
+# Build the backend
+docker run --rm -v ./backend:/app -w /app golang:1.22-alpine \
+  sh -c "go mod tidy && CGO_ENABLED=0 go build -o server main.go"
+
+# Run the backend on the host
+MCP_CONFIG_PATH=./mcp.json ./backend/server
 ```
 
 Open `https://<host>:8890` (self-signed cert) or `http://localhost:8889`.
 
-The Nextcloud calendar variables are optional — the agent works without them but won't have calendar access. The `.env` file is gitignored.
+### Nextcloud Calendar
+
+If you have a CalDAV MCP server running (e.g., on port 8000), calendar tools are automatically available. Update `mcp.json` with your server's URL.
 
 ## How It Works
 
 1. Speak into the microphone or type a message
-2. Audio is transcribed by Whisper; text is sent to the LLM via Ollama
-3. The model uses tools to store knots, search knowledge, manage entities, link relationships, and query/create calendar events — all backed by mempalace's semantic search, knowledge graph, and Nextcloud CalDAV
+2. Audio is transcribed by Whisper; text is sent to Claude via the CLI
+3. Claude uses MCP tools to store knots, search knowledge, manage entities, link relationships, and query/create calendar events
 4. New data cards appear in the center column, agent replies are spoken via Piper TTS
 5. Cards age and fade out over time; drag to pin important ones
+
+## MCP Tools
+
+The same MCP servers power both the webui and your terminal Claude Code sessions:
+
+- **mempalace** — store/search drawers, knowledge graph facts, entity queries
+- **caldav** — list/create/update/delete calendar events (if configured)
+
+Add `mcp.json` to your Claude Code project or pass `--mcp-config ./mcp.json` to use these tools from the terminal.
 
 ## Memory Palace
 
 - **Drawers** — verbatim knowledge chunks stored in ChromaDB, searchable by meaning
 - **Knowledge Graph** — entities and temporal relationships in SQLite
 - **Semantic Search** — find anything by what it means, not just what it says
-
-## Nextcloud Calendar
-
-Nodino integrates with Nextcloud via CalDAV:
-
-- **Query events** — "what's on my calendar this week?"
-- **Create events** — "schedule a meeting with Daniel on Friday at 2pm"
-- Events appear as appointment cards on screen
 
 ## Knowledge Types
 
