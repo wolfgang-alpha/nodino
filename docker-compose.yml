@@ -13,6 +13,18 @@ services:
     ports:
       - "9000:5000"
 
+  nodino-mcp:
+    build: ./nodino-mcp
+    restart: unless-stopped
+    environment:
+      NODINO_URL: "http://host.docker.internal:8085"
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8003"
+    ports:
+      - "8003:8003"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   nginx:
     image: nginx:alpine
     restart: unless-stopped

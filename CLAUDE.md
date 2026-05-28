@@ -13,7 +13,7 @@ Metadata is encoded as prefix tags in the drawer content:
 
 ```
 [importance:N] where N is 1-5 (1=trivial, 2=minor, 3=normal, 4=important, 5=urgent)
-[status:VALUE]  for tasks: backlog, todo, in_progress, done
+[status:VALUE]  for tasks: todo, in_progress, waiting, done
 [occurs_at:DATETIME] for time-sensitive items (ISO 8601)
 ```
 
