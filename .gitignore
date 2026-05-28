@@ -1,4 +1,4 @@
 nginx/certs/
 backend/server
 *.db
-mempalace-data/
+resume.sh
