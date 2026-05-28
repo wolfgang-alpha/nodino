@@ -8,14 +8,15 @@
 </head>
 <body>
     <div id="top-bar">
+        <button id="sort-btn" title="Sort by importance">↓ sort</button>
         <button id="todo-toggle">view</button>
         <button id="add-btn">+ add</button>
     </div>
 
-    <div id="add-popup" class="add-popup">
-        <input type="text" id="add-task-input" placeholder="what needs to be done?" autocomplete="off">
-        <div class="add-popup-row">
-            <span class="add-label">importance</span>
+    <div id="add-popup" class="popup-panel">
+        <textarea id="add-task-input" placeholder="what needs to be done?" autocomplete="off" rows="3"></textarea>
+        <div class="popup-row">
+            <span class="popup-label">importance</span>
             <div class="importance-picker" id="add-importance">
                 <button data-val="1" class="imp-btn">1</button>
                 <button data-val="2" class="imp-btn">2</button>
@@ -24,7 +25,27 @@
                 <button data-val="5" class="imp-btn">5</button>
             </div>
         </div>
-        <button id="add-submit" class="add-submit">add task</button>
+        <button id="add-submit" class="popup-action">add task</button>
+    </div>
+
+    <div id="edit-overlay" class="edit-overlay">
+        <div class="edit-modal">
+            <textarea id="edit-task-input" autocomplete="off" rows="3"></textarea>
+            <div class="popup-row">
+                <span class="popup-label">importance</span>
+                <div class="importance-picker" id="edit-importance">
+                    <button data-val="1" class="imp-btn">1</button>
+                    <button data-val="2" class="imp-btn">2</button>
+                    <button data-val="3" class="imp-btn">3</button>
+                    <button data-val="4" class="imp-btn">4</button>
+                    <button data-val="5" class="imp-btn">5</button>
+                </div>
+            </div>
+            <div class="edit-actions">
+                <button id="edit-cancel" class="popup-action cancel">cancel</button>
+                <button id="edit-submit" class="popup-action">save</button>
+            </div>
+        </div>
     </div>
 
     <div id="kanban-board">
@@ -66,9 +87,16 @@ const addPopup = document.getElementById('add-popup');
 const addTaskInput = document.getElementById('add-task-input');
 const addImportance = document.getElementById('add-importance');
 const addSubmit = document.getElementById('add-submit');
+const editOverlay = document.getElementById('edit-overlay');
+const editTaskInput = document.getElementById('edit-task-input');
+const editImportance = document.getElementById('edit-importance');
+const editSubmit = document.getElementById('edit-submit');
+const editCancel = document.getElementById('edit-cancel');
 
 let todoVisible = false;
 let addPopupOpen = false;
+let editTaskId = null;
+let editImp = 3;
 let newTaskImportance = 3;
 
 // --- Add task popup ---
@@ -100,32 +128,80 @@ async function submitTask() {
     if (!content) return;
     addTaskInput.value = '';
     closeAddPopup();
-
     try {
         await fetch('/api/knots', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content, type: 'task', importance: newTaskImportance })
         });
-        if (todoVisible) loadTodo();
-        else loadKanban();
-    } catch (err) {
-        console.error('create error:', err);
-    }
+        if (todoVisible) loadTodo(); else loadKanban();
+    } catch (err) { console.error('create error:', err); }
 }
 
 addSubmit.addEventListener('click', submitTask);
 addTaskInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') submitTask();
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitTask(); }
     if (e.key === 'Escape') closeAddPopup();
 });
 addPopup.addEventListener('click', (e) => e.stopPropagation());
+
+// --- Edit task modal ---
+
+function openEditModal(task) {
+    closeAddPopup();
+    closeAllPickers();
+    editTaskId = task.id;
+    editImp = task.importance;
+    editTaskInput.value = task.content;
+    editImportance.querySelectorAll('.imp-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.val === String(editImp));
+    });
+    editOverlay.classList.add('visible');
+    setTimeout(() => editTaskInput.focus(), 50);
+}
+
+function closeEditModal() {
+    editOverlay.classList.remove('visible');
+    editTaskId = null;
+}
+
+editImportance.addEventListener('click', (e) => {
+    if (!e.target.classList.contains('imp-btn')) return;
+    editImp = parseInt(e.target.dataset.val);
+    editImportance.querySelectorAll('.imp-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.val === String(editImp));
+    });
+});
+
+async function submitEdit() {
+    const content = editTaskInput.value.trim();
+    if (!content || !editTaskId) return;
+    closeEditModal();
+    try {
+        await fetch('/api/knots', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: editTaskId, content, importance: editImp })
+        });
+        if (todoVisible) loadTodo(); else loadKanban();
+    } catch (err) { console.error('edit error:', err); }
+}
+
+editSubmit.addEventListener('click', submitEdit);
+editCancel.addEventListener('click', closeEditModal);
+editTaskInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitEdit(); }
+    if (e.key === 'Escape') closeEditModal();
+});
+editOverlay.addEventListener('click', (e) => {
+    if (e.target === editOverlay) closeEditModal();
+});
 
 // --- Load kanban ---
 
 async function loadKanban() {
     try {
-        const res = await fetch('/api/knots?type=task&limit=200');
+        const res = await fetch('/api/knots?limit=200');
         const tasks = await res.json();
         if (!tasks) return;
 
@@ -141,9 +217,7 @@ async function loadKanban() {
             const count = col.querySelector('.kanban-cards').children.length;
             col.querySelector('.kanban-column-count').textContent = count;
         });
-    } catch (e) {
-        console.error('kanban load error:', e);
-    }
+    } catch (e) { console.error('kanban load error:', e); }
 }
 
 function createKanbanCard(task) {
@@ -152,11 +226,10 @@ function createKanbanCard(task) {
     card.draggable = true;
     card.dataset.id = task.id;
 
-    const dots = importanceDots(task.importance);
-
     card.innerHTML = `
         <div class="card-header">
-            <span class="card-importance">${dots}</span>
+            <span class="card-importance">${importanceDots(task.importance)}</span>
+            <button class="card-edit" title="Edit">✎</button>
             <button class="card-delete" title="Delete">×</button>
         </div>
         <div class="card-content">${escapeHtml(task.content)}</div>
@@ -175,15 +248,18 @@ function createKanbanCard(task) {
         try {
             await fetch(`/api/knots?id=${encodeURIComponent(task.id)}`, { method: 'DELETE' });
             loadKanban();
-        } catch (err) {
-            console.error('delete error:', err);
-        }
+        } catch (err) { console.error('delete error:', err); }
+    });
+
+    card.querySelector('.card-edit').addEventListener('click', (e) => {
+        e.stopPropagation();
+        openEditModal(task);
     });
 
     return card;
 }
 
-// --- Drag and drop on columns ---
+// --- Drag and drop ---
 
 kanbanBoard.querySelectorAll('.kanban-column').forEach(column => {
     let dragCounter = 0;
@@ -192,6 +268,13 @@ kanbanBoard.querySelectorAll('.kanban-column').forEach(column => {
     column.addEventListener('dragover', (e) => {
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
+
+        // Show drop indicator between cards
+        const dragging = document.querySelector('.dragging');
+        if (!dragging) return;
+        const afterCard = getDragAfterCard(dropZone, e.clientY);
+        if (afterCard) dropZone.insertBefore(dragging, afterCard);
+        else dropZone.appendChild(dragging);
     });
 
     column.addEventListener('dragenter', (e) => {
@@ -212,18 +295,39 @@ kanbanBoard.querySelectorAll('.kanban-column').forEach(column => {
         const taskId = e.dataTransfer.getData('text/plain');
         const newStatus = column.dataset.status;
 
+        // Collect new order for this column
+        const order = [...dropZone.querySelectorAll('.kanban-card')].map(c => c.dataset.id);
+
         try {
             await fetch('/api/knots', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ id: taskId, status: newStatus })
             });
+            await fetch('/api/knots/reorder', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ order })
+            });
             loadKanban();
-        } catch (err) {
-            console.error('status update error:', err);
-        }
+        } catch (err) { console.error('drop error:', err); }
     });
 });
+
+function getDragAfterCard(container, y) {
+    const cards = [...container.querySelectorAll('.kanban-card:not(.dragging)')];
+    let closest = null;
+    let closestOffset = Number.NEGATIVE_INFINITY;
+    cards.forEach(card => {
+        const box = card.getBoundingClientRect();
+        const offset = y - box.top - box.height / 2;
+        if (offset < 0 && offset > closestOffset) {
+            closestOffset = offset;
+            closest = card;
+        }
+    });
+    return closest;
+}
 
 // --- Todo list ---
 
@@ -232,13 +336,12 @@ todoToggle.addEventListener('click', () => {
     todoList.classList.toggle('visible', todoVisible);
     kanbanBoard.classList.toggle('hidden', todoVisible);
     todoToggle.classList.toggle('active', todoVisible);
-    if (todoVisible) loadTodo();
-    else loadKanban();
+    if (todoVisible) loadTodo(); else loadKanban();
 });
 
 async function loadTodo() {
     try {
-        const res = await fetch('/api/knots?type=task&limit=200');
+        const res = await fetch('/api/knots?limit=200');
         const tasks = await res.json();
         if (!tasks) return;
 
@@ -255,22 +358,18 @@ async function loadTodo() {
             const count = sec.querySelector('.todo-items').children.length;
             sec.querySelector('.todo-section-count').textContent = count;
         });
-    } catch (e) {
-        console.error('todo load error:', e);
-    }
+    } catch (e) { console.error('todo load error:', e); }
 }
 
 function createTodoItem(task) {
     const item = document.createElement('div');
     item.className = 'todo-item';
-
-    const dots = importanceDots(task.importance);
     const status = task.status || 'todo';
 
     item.innerHTML = `
         <span class="status-dot ${status}"></span>
         <span class="todo-text">${escapeHtml(task.content)}</span>
-        <span class="card-importance">${dots}</span>
+        <span class="card-importance">${importanceDots(task.importance)}</span>
     `;
 
     item.addEventListener('click', (e) => {
@@ -278,7 +377,10 @@ function createTodoItem(task) {
         closeAllPickers();
         const picker = document.createElement('div');
         picker.className = 'status-picker';
-        picker.innerHTML = [
+        picker.innerHTML = `
+            <button class="sp-btn sp-edit" data-action="edit">edit</button>
+            <div class="sp-divider"></div>
+        ` + [
             ['todo', 'To Do'],
             ['in_progress', 'In Progress'],
             ['waiting', 'Waiting'],
@@ -290,6 +392,7 @@ function createTodoItem(task) {
         picker.addEventListener('click', async (pe) => {
             const btn = pe.target.closest('.sp-btn');
             if (!btn) return;
+            if (btn.dataset.action === 'edit') { picker.remove(); openEditModal(task); return; }
             const newStatus = btn.dataset.status;
             picker.remove();
             if (newStatus === status) return;
@@ -300,11 +403,8 @@ function createTodoItem(task) {
                     body: JSON.stringify({ id: task.id, status: newStatus })
                 });
                 loadTodo();
-            } catch (err) {
-                console.error('status error:', err);
-            }
+            } catch (err) { console.error('status error:', err); }
         });
-
         item.appendChild(picker);
     });
 
@@ -331,6 +431,7 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         closeAllPickers();
         closeAddPopup();
+        closeEditModal();
         if (todoVisible) {
             todoVisible = false;
             todoList.classList.remove('visible');
@@ -343,10 +444,32 @@ document.addEventListener('keydown', (e) => {
 
 document.addEventListener('click', (e) => {
     if (!e.target.closest('.todo-item')) closeAllPickers();
-    if (!e.target.closest('.add-popup') && !e.target.closest('#add-btn')) closeAddPopup();
+    if (!e.target.closest('.popup-panel') && !e.target.closest('#add-btn')) closeAddPopup();
 });
 
-// --- Init ---
+// --- Sort by importance ---
+
+document.getElementById('sort-btn').addEventListener('click', async () => {
+    const columns = kanbanBoard.querySelectorAll('.kanban-column');
+    for (const col of columns) {
+        const cards = [...col.querySelectorAll('.kanban-card')];
+        cards.sort((a, b) => {
+            const impA = (a.querySelector('.card-importance')?.textContent.match(/●/g) || []).length;
+            const impB = (b.querySelector('.card-importance')?.textContent.match(/●/g) || []).length;
+            return impB - impA;
+        });
+        const container = col.querySelector('.kanban-cards');
+        cards.forEach(c => container.appendChild(c));
+        const order = cards.map(c => c.dataset.id);
+        if (order.length > 0) {
+            await fetch('/api/knots/reorder', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ order })
+            });
+        }
+    }
+});
 
 loadKanban();
 </script>

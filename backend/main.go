@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -21,6 +22,7 @@ func main() {
 	defer db.Close()
 
 	http.HandleFunc("/api/knots", handleKnots)
+	http.HandleFunc("/api/knots/reorder", handleReorder)
 
 	port := envOr("PORT", "8085")
 	log.Printf("backend listening on :%s", port)
@@ -39,12 +41,15 @@ func initDB(path string) {
 		content TEXT NOT NULL,
 		importance INTEGER NOT NULL DEFAULT 3,
 		status TEXT NOT NULL DEFAULT 'todo',
+		position INTEGER NOT NULL DEFAULT 0,
 		occurs_at TEXT,
 		created_at TEXT NOT NULL
 	)`)
 	if err != nil {
 		log.Fatal("failed to create table:", err)
 	}
+
+	db.Exec("ALTER TABLE tasks ADD COLUMN position INTEGER NOT NULL DEFAULT 0")
 
 	log.Printf("database ready at %s", path)
 }
@@ -77,7 +82,7 @@ func handleGetKnots(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := db.Query(
-		"SELECT id, content, importance, status, occurs_at, created_at FROM tasks ORDER BY created_at DESC LIMIT ?",
+		"SELECT id, content, importance, status, position, occurs_at, created_at FROM tasks ORDER BY position ASC, importance DESC, created_at DESC LIMIT ?",
 		limit,
 	)
 	if err != nil {
@@ -90,7 +95,7 @@ func handleGetKnots(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var t taskJSON
 		var occursAt sql.NullString
-		if err := rows.Scan(&t.ID, &t.Content, &t.Importance, &t.Status, &occursAt, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Content, &t.Importance, &t.Status, &t.Position, &occursAt, &t.CreatedAt); err != nil {
 			continue
 		}
 		if occursAt.Valid {
@@ -119,7 +124,7 @@ func handleCreateKnot(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now().Format(time.RFC3339)
 	result, err := db.Exec(
-		"INSERT INTO tasks (content, importance, status, occurs_at, created_at) VALUES (?, ?, 'todo', ?, ?)",
+		"INSERT INTO tasks (content, importance, status, position, occurs_at, created_at) VALUES (?, ?, 'todo', 0, ?, ?)",
 		req.Content, req.Importance, req.OccursAt, now,
 	)
 	if err != nil {
@@ -141,15 +146,38 @@ func handleCreateKnot(w http.ResponseWriter, r *http.Request) {
 
 func handleUpdateKnot(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		ID         string `json:"id"`
+		Status     string `json:"status,omitempty"`
+		Content    string `json:"content,omitempty"`
+		Importance *int   `json:"importance,omitempty"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" || req.Status == "" {
-		writeJSON(w, 400, map[string]string{"error": "id and status are required"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+		writeJSON(w, 400, map[string]string{"error": "id is required"})
 		return
 	}
 
-	res, err := db.Exec("UPDATE tasks SET status = ? WHERE id = ?", req.Status, req.ID)
+	sets := []string{}
+	args := []interface{}{}
+	if req.Status != "" {
+		sets = append(sets, "status = ?")
+		args = append(args, req.Status)
+	}
+	if req.Content != "" {
+		sets = append(sets, "content = ?")
+		args = append(args, req.Content)
+	}
+	if req.Importance != nil && *req.Importance >= 1 && *req.Importance <= 5 {
+		sets = append(sets, "importance = ?")
+		args = append(args, *req.Importance)
+	}
+	if len(sets) == 0 {
+		writeJSON(w, 400, map[string]string{"error": "nothing to update"})
+		return
+	}
+
+	query := "UPDATE tasks SET " + strings.Join(sets, ", ") + " WHERE id = ?"
+	args = append(args, req.ID)
+	res, err := db.Exec(query, args...)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
@@ -186,6 +214,33 @@ func handleDeleteKnot(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }
 
+func handleReorder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Order []string `json:"order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Order) == 0 {
+		writeJSON(w, 400, map[string]string{"error": "order array is required"})
+		return
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+	for i, id := range req.Order {
+		tx.Exec("UPDATE tasks SET position = ? WHERE id = ?", i+1, id)
+	}
+	tx.Commit()
+
+	writeJSON(w, 200, map[string]string{"status": "reordered"})
+}
+
 // --- Types ---
 
 type taskJSON struct {
@@ -193,6 +248,7 @@ type taskJSON struct {
 	Content    string  `json:"content"`
 	Importance int     `json:"importance"`
 	Status     string  `json:"status"`
+	Position   int     `json:"position"`
 	OccursAt   *string `json:"occurs_at,omitempty"`
 	CreatedAt  string  `json:"created_at"`
 }

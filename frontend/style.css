@@ -78,8 +78,8 @@ html, body {
     color: var(--accent);
 }
 
-/* --- Add task popup --- */
-.add-popup {
+/* --- Popup panels (add + edit) --- */
+.popup-panel {
     display: none;
     position: fixed;
     top: 52px;
@@ -95,11 +95,12 @@ html, body {
     gap: 10px;
 }
 
-.add-popup.visible {
+.popup-panel.visible {
     display: flex;
 }
 
-.add-popup input[type="text"] {
+.popup-panel textarea,
+.edit-modal textarea {
     width: 100%;
     padding: 10px 12px;
     background: var(--input-bg);
@@ -109,30 +110,34 @@ html, body {
     font-family: 'Courier New', monospace;
     font-size: 13px;
     outline: none;
+    resize: vertical;
+    min-height: 70px;
 }
 
-.add-popup input[type="text"]:focus {
+.popup-panel textarea:focus,
+.edit-modal textarea:focus {
     border-color: var(--input-focus-border);
 }
 
-.add-popup input[type="text"]::placeholder {
+.popup-panel textarea::placeholder,
+.edit-modal textarea::placeholder {
     color: var(--text-dim);
 }
 
-.add-popup-row {
+.popup-row {
     display: flex;
     align-items: center;
     gap: 10px;
 }
 
-.add-label {
+.popup-label {
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 1px;
     color: var(--text-dim);
 }
 
-.add-submit {
+.popup-action {
     padding: 8px;
     background: rgba(74, 111, 165, 0.15);
     border: 1px solid var(--accent);
@@ -146,8 +151,57 @@ html, body {
     transition: background 0.15s;
 }
 
-.add-submit:hover {
+.popup-action:hover {
     background: rgba(74, 111, 165, 0.3);
+}
+
+.popup-action.cancel {
+    background: none;
+    border-color: var(--card-border);
+    color: var(--text-dim);
+}
+
+.popup-action.cancel:hover {
+    border-color: var(--text-dim);
+    color: var(--text);
+    background: none;
+}
+
+/* --- Edit modal overlay --- */
+.edit-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 300;
+    align-items: center;
+    justify-content: center;
+}
+
+.edit-overlay.visible {
+    display: flex;
+}
+
+.edit-modal {
+    background: var(--bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 18px;
+    width: 360px;
+    max-width: calc(100vw - 32px);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.edit-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
 }
 
 /* --- Kanban board (main view) --- */
@@ -242,26 +296,40 @@ html, body {
     min-height: 1em;
 }
 
-/* Delete button */
-.card-delete {
-    margin-left: auto;
+/* Card action buttons */
+.card-edit, .card-delete {
     background: none;
     border: none;
     color: var(--text-dim);
-    font-size: 16px;
     cursor: pointer;
     padding: 0 4px;
     line-height: 1;
     opacity: 0;
-    transition: opacity 0.15s, color 0.15s;
+    transition: opacity 0.15s, color 0.15s, text-shadow 0.15s;
 }
 
+.card-edit {
+    margin-left: auto;
+    font-size: 14px;
+}
+
+.card-delete {
+    font-size: 16px;
+}
+
+.kanban-card:hover .card-edit,
 .kanban-card:hover .card-delete {
     opacity: 1;
 }
 
+.card-edit:hover {
+    color: #4a9fff;
+    text-shadow: 0 0 8px rgba(74, 159, 255, 0.6), 0 0 16px rgba(74, 159, 255, 0.3);
+}
+
 .card-delete:hover {
-    color: var(--danger);
+    color: #ff4a4a;
+    text-shadow: 0 0 8px rgba(255, 74, 74, 0.6), 0 0 16px rgba(255, 74, 74, 0.3);
 }
 
 .card-importance {
@@ -436,4 +504,15 @@ html, body {
 
 .sp-btn.current {
     color: var(--accent);
+}
+
+.sp-btn.sp-edit {
+    color: var(--text-dim);
+    font-style: italic;
+}
+
+.sp-divider {
+    height: 1px;
+    background: var(--card-border);
+    margin: 2px 4px;
 }
