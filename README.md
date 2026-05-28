@@ -4,20 +4,19 @@
 
 ---
 
-A task and knowledge management webui backed by [MemPalace](https://github.com/MemPalace/mempalace) — a semantic memory store with a temporal knowledge graph.
+A kanban board and todo list backed by [MemPalace](https://github.com/MemPalace/mempalace), with an MCP server for Claude Code integration.
 
-Nodino displays structured knowledge as data cards: tasks, events, observations, ideas, and more. Cards age and fade over time; drag to pin important ones. A kanban board and todo list provide focused task views.
+Manage tasks across four columns — To Do, In Progress, Waiting, Done — via drag-and-drop in the browser or MCP tools from the CLI.
 
 ## Architecture
 
 | Component | Role |
 |-----------|------|
-| **backend** | Go server on host — knots CRUD API via mempalace REST |
-| **whisper** | Speech-to-text via faster-whisper (medium.en) |
-| **piper** | Text-to-speech via Piper TTS |
+| **backend** | Go server on host — task CRUD API via mempalace REST |
+| **nodino-mcp** | MCP server exposing task tools to Claude Code |
 | **nginx** | Static frontend + HTTPS reverse proxy |
 
-Mempalace runs as a standalone service (see [mempalace-docker-compose](https://github.com/wolfgang-alpha/mempalace-docker-compose)). Claude Code orchestrates everything via MCP tools.
+Mempalace runs as a standalone service (see [mempalace-docker-compose](https://github.com/wolfgang-alpha/mempalace-docker-compose)).
 
 ## Quick Start
 
@@ -37,21 +36,25 @@ MEMPALACE_URL=http://localhost:8002 ./backend/server
 
 Open `https://<host>:8890` (self-signed cert) or `http://localhost:8889`.
 
-## Knowledge Types
+## MCP Tools
 
-event, appointment, reminder, observation, mood, log, anecdote, idea, project, decision, contact, task
+The nodino MCP server (`:8003`) exposes task management to Claude Code:
+
+- `list_tasks(limit)` — list all tasks
+- `create_task(content, importance)` — create a new task (starts as todo)
+- `update_status(task_id, status)` — change status (todo, in_progress, waiting, done)
+- `delete_task(task_id)` — remove a task
+
+Register with: `claude mcp add --scope user --transport http nodino http://localhost:8003/mcp`
 
 ## UI Features
 
-- Three-column layout: agent bubbles (left) | data cards (center) | user bubbles (right)
-- Voice input via microphone button + text input
-- Drag-to-pin cards to prevent fade-out
-- Double-click cards to edit inline
-- Kanban board for task management
-- Todo list view (todo + in-progress only)
+- Full-screen kanban board with four columns (To Do, In Progress, Waiting, Done)
+- Drag-and-drop cards between columns
+- Create and delete tasks
+- Todo list view (todo + in-progress only) with status picker
 - Auto dark/light mode
-- TTS playback of agent responses
 
 ## Credits
 
-Semantic memory and knowledge graph powered by [MemPalace](https://github.com/MemPalace/mempalace).
+Task storage powered by [MemPalace](https://github.com/MemPalace/mempalace).
