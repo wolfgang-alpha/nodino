@@ -1,24 +1,24 @@
 package main
 
 import (
-	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
-	"strings"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
-var mempalaceURL string
+var db *sql.DB
 
 func main() {
-	mempalaceURL = envOr("MEMPALACE_URL", "http://localhost:8002")
-
-	waitForMempalace()
+	dbPath := envOr("DB_PATH", "./nodino.db")
+	initDB(dbPath)
+	defer db.Close()
 
 	http.HandleFunc("/api/knots", handleKnots)
 
@@ -27,21 +27,26 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
-func waitForMempalace() {
-	client := &http.Client{Timeout: 2 * time.Second}
-	for i := 0; i < 30; i++ {
-		resp, err := client.Get(mempalaceURL + "/health")
-		if err == nil {
-			resp.Body.Close()
-			if resp.StatusCode == 200 {
-				log.Println("mempalace is ready")
-				return
-			}
-		}
-		log.Printf("waiting for mempalace... (%v)", err)
-		time.Sleep(2 * time.Second)
+func initDB(path string) {
+	var err error
+	db, err = sql.Open("sqlite", path)
+	if err != nil {
+		log.Fatal("failed to open database:", err)
 	}
-	log.Fatal("mempalace did not become ready")
+
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS tasks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		content TEXT NOT NULL,
+		importance INTEGER NOT NULL DEFAULT 3,
+		status TEXT NOT NULL DEFAULT 'todo',
+		occurs_at TEXT,
+		created_at TEXT NOT NULL
+	)`)
+	if err != nil {
+		log.Fatal("failed to create table:", err)
+	}
+
+	log.Printf("database ready at %s", path)
 }
 
 // --- Knots API ---
@@ -63,121 +68,100 @@ func handleKnots(w http.ResponseWriter, r *http.Request) {
 
 func handleGetKnots(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	ktype := q.Get("type")
 	limitStr := q.Get("limit")
-	limit := 20
+	limit := 50
 	if limitStr != "" {
 		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
 			limit = l
 		}
 	}
 
-	results, err := mpSearch("*", ktype, limit)
+	rows, err := db.Query(
+		"SELECT id, content, importance, status, occurs_at, created_at FROM tasks ORDER BY created_at DESC LIMIT ?",
+		limit,
+	)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
+	defer rows.Close()
 
-	var knots []knotJSON
-	for _, r := range results {
-		knots = append(knots, parseDrawerToKnot(r))
+	tasks := []taskJSON{}
+	for rows.Next() {
+		var t taskJSON
+		var occursAt sql.NullString
+		if err := rows.Scan(&t.ID, &t.Content, &t.Importance, &t.Status, &occursAt, &t.CreatedAt); err != nil {
+			continue
+		}
+		if occursAt.Valid {
+			t.OccursAt = &occursAt.String
+		}
+		tasks = append(tasks, t)
 	}
 
-	writeJSON(w, 200, knots)
+	writeJSON(w, 200, tasks)
 }
 
 func handleCreateKnot(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Content    string `json:"content"`
-		Type       string `json:"type"`
-		Importance int    `json:"importance"`
+		Content    string  `json:"content"`
+		Importance int     `json:"importance"`
+		OccursAt   *string `json:"occurs_at,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Content == "" {
 		writeJSON(w, 400, map[string]string{"error": "content is required"})
 		return
 	}
 
-	if req.Type == "" {
-		req.Type = "task"
-	}
 	if req.Importance < 1 || req.Importance > 5 {
 		req.Importance = 3
 	}
 
-	status := "todo"
-	tagged := fmt.Sprintf("[importance:%d][status:%s] %s", req.Importance, status, req.Content)
-
-	drawerID, err := mpStoreDrawer("nodino", req.Type, tagged)
+	now := time.Now().Format(time.RFC3339)
+	result, err := db.Exec(
+		"INSERT INTO tasks (content, importance, status, occurs_at, created_at) VALUES (?, ?, 'todo', ?, ?)",
+		req.Content, req.Importance, req.OccursAt, now,
+	)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 
-	mpAddFact(drawerID, "has_status", status)
-
-	writeJSON(w, 201, knotJSON{
-		ID:         drawerID,
+	id, _ := result.LastInsertId()
+	status := "todo"
+	writeJSON(w, 201, taskJSON{
+		ID:         fmt.Sprintf("%d", id),
 		Content:    req.Content,
-		Type:       req.Type,
 		Importance: req.Importance,
-		Status:     &status,
+		Status:     status,
+		OccursAt:   req.OccursAt,
+		CreatedAt:  now,
 	})
 }
 
 func handleUpdateKnot(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ID     string `json:"id"`
-		Status string `json:"status,omitempty"`
+		Status string `json:"status"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
-		writeJSON(w, 400, map[string]string{"error": "id is required"})
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" || req.Status == "" {
+		writeJSON(w, 400, map[string]string{"error": "id and status are required"})
 		return
 	}
 
-	if req.Status == "" {
-		writeJSON(w, 400, map[string]string{"error": "status is required"})
-		return
-	}
-
-	// Find the current drawer
-	results, err := mpSearch("*", "task", 200)
+	res, err := db.Exec("UPDATE tasks SET status = ? WHERE id = ?", req.Status, req.ID)
 	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
 		return
 	}
 
-	var found *searchResult
-	for _, sr := range results {
-		if sr.ID == req.ID {
-			found = &sr
-			break
-		}
-	}
-	if found == nil {
+	n, _ := res.RowsAffected()
+	if n == 0 {
 		writeJSON(w, 404, map[string]string{"error": "task not found"})
 		return
 	}
 
-	knot := parseDrawerToKnot(*found)
-
-	// Rebuild content with new status tag
-	tagged := fmt.Sprintf("[importance:%d][status:%s]", knot.Importance, req.Status)
-	if knot.OccursAt != nil {
-		tagged += fmt.Sprintf("[occurs_at:%s]", *knot.OccursAt)
-	}
-	tagged += " " + knot.Content
-
-	// Replace: delete old, create new
-	mpDeleteDrawer(req.ID)
-	newID, err := mpStoreDrawer("nodino", "task", tagged)
-	if err != nil {
-		writeJSON(w, 500, map[string]string{"error": err.Error()})
-		return
-	}
-
-	mpAddFact(newID, "has_status", req.Status)
-
-	writeJSON(w, 200, map[string]string{"status": "updated", "id": newID})
+	writeJSON(w, 200, map[string]string{"status": "updated"})
 }
 
 func handleDeleteKnot(w http.ResponseWriter, r *http.Request) {
@@ -187,173 +171,29 @@ func handleDeleteKnot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := mpDeleteDrawer(id); err != nil {
+	res, err := db.Exec("DELETE FROM tasks WHERE id = ?", id)
+	if err != nil {
 		writeJSON(w, 500, map[string]string{"error": err.Error()})
+		return
+	}
+
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		writeJSON(w, 404, map[string]string{"error": "task not found"})
 		return
 	}
 
 	writeJSON(w, 200, map[string]string{"status": "deleted"})
 }
 
-// --- Mempalace REST client ---
-
-type searchResult struct {
-	ID         string  `json:"id"`
-	Content    string  `json:"content"`
-	Text       string  `json:"text"`
-	Wing       string  `json:"wing"`
-	Room       string  `json:"room"`
-	Score      float64 `json:"score"`
-	Similarity float64 `json:"similarity"`
-	FiledAt    string  `json:"filed_at"`
-	SourceFile string  `json:"source_file"`
-}
-
-func mpSearch(query, room string, limit int) ([]searchResult, error) {
-	payload := map[string]interface{}{
-		"query": query,
-		"limit": limit,
-		"wing":  "nodino",
-	}
-	if room != "" {
-		payload["room"] = room
-	}
-	body, _ := json.Marshal(payload)
-	resp, err := http.Post(mempalaceURL+"/search", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("search error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var parsed struct {
-		Results []searchResult `json:"results"`
-	}
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return nil, fmt.Errorf("parse error: %w", err)
-	}
-	return parsed.Results, nil
-}
-
-func mpStoreDrawer(wing, room, content string) (string, error) {
-	payload := map[string]string{"wing": wing, "room": room, "content": content}
-	body, _ := json.Marshal(payload)
-	resp, err := http.Post(mempalaceURL+"/drawers", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("store error %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result struct {
-		DrawerID string `json:"drawer_id"`
-	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("parse error: %w", err)
-	}
-	return result.DrawerID, nil
-}
-
-func mpDeleteDrawer(drawerID string) error {
-	req, _ := http.NewRequest(http.MethodDelete, mempalaceURL+"/drawers/"+drawerID, nil)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("delete error %d", resp.StatusCode)
-	}
-	return nil
-}
-
-func mpAddFact(subject, predicate, object string) error {
-	payload := map[string]string{"subject": subject, "predicate": predicate, "object": object}
-	body, _ := json.Marshal(payload)
-	resp, err := http.Post(mempalaceURL+"/kg/facts", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
-}
-
-func mpInvalidateFact(subject, predicate, object string) error {
-	payload := map[string]string{"subject": subject, "predicate": predicate, "object": object}
-	body, _ := json.Marshal(payload)
-	resp, err := http.Post(mempalaceURL+"/kg/facts/invalidate", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
-}
-
-// --- Drawer to knot parsing ---
-
-func parseDrawerToKnot(r searchResult) knotJSON {
-	k := knotJSON{
-		ID:         r.ID,
-		Type:       r.Room,
-		Importance: 3,
-		CreatedAt:  r.FiledAt,
-	}
-
-	content := r.Content
-	if content == "" {
-		content = r.Text
-	}
-
-	if strings.HasPrefix(content, "[") {
-		for strings.HasPrefix(content, "[") {
-			end := strings.Index(content, "]")
-			if end == -1 {
-				break
-			}
-			tag := content[1:end]
-			content = content[end+1:]
-
-			parts := strings.SplitN(tag, ":", 2)
-			if len(parts) != 2 {
-				break
-			}
-			switch parts[0] {
-			case "importance":
-				if v, err := strconv.Atoi(parts[1]); err == nil {
-					k.Importance = v
-				}
-			case "occurs_at":
-				s := parts[1]
-				k.OccursAt = &s
-			case "status":
-				s := parts[1]
-				k.Status = &s
-			}
-		}
-		content = strings.TrimSpace(content)
-	}
-
-	k.Content = content
-	return k
-}
-
 // --- Types ---
 
-type knotJSON struct {
+type taskJSON struct {
 	ID         string  `json:"id"`
 	Content    string  `json:"content"`
-	Type       string  `json:"type"`
 	Importance int     `json:"importance"`
+	Status     string  `json:"status"`
 	OccursAt   *string `json:"occurs_at,omitempty"`
-	Status     *string `json:"status,omitempty"`
 	CreatedAt  string  `json:"created_at"`
 }
 

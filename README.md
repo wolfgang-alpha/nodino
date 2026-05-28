@@ -4,34 +4,32 @@
 
 ---
 
-A kanban board and todo list backed by [MemPalace](https://github.com/MemPalace/mempalace), with an MCP server for Claude Code integration.
+A kanban board and todo list with an MCP server for Claude Code integration.
 
-Manage tasks across four columns — To Do, In Progress, Waiting, Done — via drag-and-drop in the browser or MCP tools from the CLI.
+Manage tasks across four columns — To Do, In Progress, Waiting, Done — via drag-and-drop in the browser or MCP tools from the CLI. Data is stored in a local SQLite database.
 
 ## Architecture
 
 | Component | Role |
 |-----------|------|
-| **backend** | Go server on host — task CRUD API via mempalace REST |
+| **backend** | Go server on host — task CRUD API with SQLite |
 | **nodino-mcp** | MCP server exposing task tools to Claude Code |
 | **nginx** | Static frontend + HTTPS reverse proxy |
 
-Mempalace runs as a standalone service (see [mempalace-docker-compose](https://github.com/wolfgang-alpha/mempalace-docker-compose)).
-
 ## Quick Start
 
-Prerequisites: Docker, standalone mempalace running on `:8002`.
+Prerequisites: Docker.
 
 ```bash
 # Start Docker services
 docker compose up --build -d
 
 # Build the backend
-docker run --rm -v ./backend:/app -w /app golang:1.22-alpine \
+docker run --rm -v ./backend:/app -w /app golang:latest \
   sh -c "go mod tidy && CGO_ENABLED=0 go build -o server main.go"
 
 # Run the backend on the host
-MEMPALACE_URL=http://localhost:8002 ./backend/server
+./backend/server
 ```
 
 Open `https://<host>:8890` (self-signed cert) or `http://localhost:8889`.
@@ -54,7 +52,3 @@ Register with: `claude mcp add --scope user --transport http nodino http://local
 - Create and delete tasks
 - Todo list view (todo + in-progress only) with status picker
 - Auto dark/light mode
-
-## Credits
-
-Task storage powered by [MemPalace](https://github.com/MemPalace/mempalace).
