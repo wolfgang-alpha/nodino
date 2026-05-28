@@ -1,18 +1,4 @@
 services:
-  whisper:
-    build: ./whisper
-    restart: unless-stopped
-    ports:
-      - "9001:5001"
-
-  piper:
-    build: ./piper
-    restart: unless-stopped
-    environment:
-      PIPER_VOICE: en_US-lessac-medium
-    ports:
-      - "9000:5000"
-
   nodino-mcp:
     build: ./nodino-mcp
     restart: unless-stopped
