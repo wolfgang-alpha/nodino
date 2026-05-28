@@ -175,13 +175,15 @@ editImportance.addEventListener('click', (e) => {
 
 async function submitEdit() {
     const content = editTaskInput.value.trim();
-    if (!content || !editTaskId) return;
+    const id = editTaskId;
+    const importance = editImp;
+    if (!content || !id) return;
     closeEditModal();
     try {
         await fetch('/api/knots', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: editTaskId, content, importance: editImp })
+            body: JSON.stringify({ id, content, importance })
         });
         if (todoVisible) loadTodo(); else loadKanban();
     } catch (err) { console.error('edit error:', err); }
@@ -236,11 +238,18 @@ function createKanbanCard(task) {
     `;
 
     card.addEventListener('dragstart', (e) => {
+        if (e.target.closest('.card-edit, .card-delete')) { e.preventDefault(); return; }
         e.dataTransfer.setData('text/plain', task.id);
         e.dataTransfer.effectAllowed = 'move';
         requestAnimationFrame(() => card.classList.add('dragging'));
     });
     card.addEventListener('dragend', () => card.classList.remove('dragging'));
+
+    // Prevent drag from starting on buttons
+    card.querySelectorAll('.card-edit, .card-delete').forEach(btn => {
+        btn.addEventListener('mousedown', (e) => e.stopPropagation());
+        btn.setAttribute('draggable', 'false');
+    });
 
     card.querySelector('.card-delete').addEventListener('click', async (e) => {
         e.stopPropagation();
