@@ -1,4 +1,2 @@
-nginx/certs/
 backend/server
 *.db
-resume.sh
